@@ -1,0 +1,179 @@
+rules_version = '2';
+
+// قواعد أمان «رصيد التميز التحصيلي»
+// - لا قراءة ولا كتابة عامة إلا لمستند لوحة العرض public/board (قراءة فقط).
+// - الصلاحية تُقرأ من users/{uid} على الخادم، لا من الواجهة.
+// - كل رصد يُتحقق منه هنا: النقاط = 5 لكل صحيحة + 5 عند صحة الثلاث، والمجاميع
+//   تزيد بالفرق نفسه بالضبط، ومعه قيد في سجل التدقيق. أي اختلاف = رفض العملية كلها.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- الهوية ----------
+    function signedIn() { return request.auth != null; }
+    function userDoc() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function isStaff() {
+      return signedIn() && exists(userDoc())
+        && get(userDoc()).data.active == true
+        && get(userDoc()).data.role in ['admin', 'teacher'];
+    }
+    function isAdmin() { return isStaff() && get(userDoc()).data.role == 'admin'; }
+
+    // ---------- المسارات ----------
+    function weekPath(w) { return /databases/$(database)/documents/weeks/$(w); }
+    function entryPath(w, s) { return /databases/$(database)/documents/weeks/$(w)/entries/$(s); }
+    function studentPath(s) { return /databases/$(database)/documents/students/$(s); }
+    function classPath(c) { return /databases/$(database)/documents/classes/$(c); }
+    function auditPath(a) { return /databases/$(database)/documents/audit/$(a); }
+
+    // ---------- الاحتساب ----------
+    function validMarks(m) {
+      return m is map && m.keys().hasOnly(['p', 'c', 'b']) && m.keys().hasAll(['p', 'c', 'b'])
+        && m.p is bool && m.c is bool && m.b is bool;
+    }
+    function correctOf(m) { return (m.p ? 1 : 0) + (m.c ? 1 : 0) + (m.b ? 1 : 0); }
+    function pointsOf(m) { return correctOf(m) * 5 + ((m.p && m.c && m.b) ? 5 : 0); }
+    function full(p) { return p == 20 ? 1 : 0; }
+    function pcN(wk, cid) { return cid in wk.perClass ? wk.perClass[cid].n : 0; }
+    function pcPts(wk, cid) { return cid in wk.perClass ? wk.perClass[cid].pts : 0; }
+
+    // التحقق من أن المجاميع الثلاثة بعد العملية = قبلها + الفرق بالضبط
+    function totalsMatch(w, s, cid, dPts, dCorrect, dPart, dFull) {
+      let st = get(studentPath(s)).data;
+      let stA = getAfter(studentPath(s)).data;
+      let cl = get(classPath(cid)).data;
+      let clA = getAfter(classPath(cid)).data;
+      let wk = get(weekPath(w)).data;
+      let wkA = getAfter(weekPath(w)).data;
+      return stA.totalPoints == st.totalPoints + dPts
+        && stA.participations == st.participations + dPart
+        && stA.correctCount == st.correctCount + dCorrect
+        && clA.totalPoints == cl.totalPoints + dPts
+        && clA.participations == cl.participations + dPart
+        && wkA.participants == wk.participants + dPart
+        && wkA.pointsTotal == wk.pointsTotal + dPts
+        && wkA.fullMarks == wk.fullMarks + dFull
+        && wkA.perClass[cid].n == pcN(wk, cid) + dPart
+        && wkA.perClass[cid].pts == pcPts(wk, cid) + dPts;
+    }
+
+    function auditFor(e) {
+      return existsAfter(auditPath(e.auditId))
+        && getAfter(auditPath(e.auditId)).data.actor == request.auth.uid;
+    }
+
+    // مشاركة كُتبت في الطلب نفسه (تحققت قاعدتها من الفروق)
+    function entryWrittenNow(w, s) {
+      return existsAfter(entryPath(w, s)) && getAfter(entryPath(w, s)).data.updatedAt == request.time;
+    }
+
+    // ---------- الإعدادات ----------
+    match /config/{id} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    // ---------- المستخدمات ----------
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // ---------- الفصول ----------
+    match /classes/{cid} {
+      allow read: if isStaff();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['totalPoints', 'participations', 'lastEntryWeek', 'lastEntryStudent', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && entryWrittenNow(request.resource.data.lastEntryWeek, request.resource.data.lastEntryStudent)
+        && getAfter(entryPath(request.resource.data.lastEntryWeek, request.resource.data.lastEntryStudent)).data.classIdAtEntry == cid);
+    }
+
+    // ---------- الطالبات ----------
+    match /students/{sid} {
+      allow read: if isStaff();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['totalPoints', 'participations', 'correctCount', 'lastEntryWeek', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && entryWrittenNow(request.resource.data.lastEntryWeek, sid));
+    }
+
+    // ---------- الأسابيع والمشاركات ----------
+    match /weeks/{w} {
+      allow read: if isStaff();
+      allow create, delete: if isAdmin();
+      // المعلمة لا تغيّر الحالة ولا مفتاح الإجابة؛ تتغير الإحصائيات فقط مع رصد موثّق
+      allow update: if isAdmin() || (isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['participants', 'pointsTotal', 'fullMarks', 'perClass', 'keyLockedAt', 'lastEntryStudent', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && entryWrittenNow(w, request.resource.data.lastEntryStudent)
+        && request.resource.data.perClass.diff(resource.data.perClass).affectedKeys()
+             .hasOnly([getAfter(entryPath(w, request.resource.data.lastEntryStudent)).data.classIdAtEntry])
+        && ((resource.data.keyLockedAt == null && request.resource.data.keyLockedAt == request.time)
+            || request.resource.data.keyLockedAt == resource.data.keyLockedAt));
+
+      match /entries/{sid} {
+        allow read: if isStaff();
+        allow delete: if false;
+
+        allow create: if isStaff()
+          && (get(weekPath(w)).data.status == 'open' || isAdmin())
+          && request.resource.data.keys().hasOnly(['marks', 'points', 'correctCount', 'classIdAtEntry', 'studentName',
+               'recordedBy', 'recordedAt', 'updatedBy', 'updatedAt', 'auditId'])
+          && validMarks(request.resource.data.marks)
+          && request.resource.data.points == pointsOf(request.resource.data.marks)
+          && request.resource.data.correctCount == correctOf(request.resource.data.marks)
+          && get(studentPath(sid)).data.active == true
+          && request.resource.data.classIdAtEntry == get(studentPath(sid)).data.classId
+          && request.resource.data.studentName == get(studentPath(sid)).data.name
+          && request.resource.data.recordedBy == request.auth.uid
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.recordedAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && auditFor(request.resource.data)
+          && totalsMatch(w, sid, request.resource.data.classIdAtEntry,
+               request.resource.data.points, request.resource.data.correctCount, 1,
+               full(request.resource.data.points));
+
+        // التعديل: للمعلمة التي رصدت والأسبوع مفتوح، أو للمديرة دائمًا
+        allow update: if isStaff()
+          && (isAdmin() || (resource.data.recordedBy == request.auth.uid && get(weekPath(w)).data.status == 'open'))
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['marks', 'points', 'correctCount', 'updatedBy', 'updatedAt', 'auditId'])
+          && validMarks(request.resource.data.marks)
+          && request.resource.data.points == pointsOf(request.resource.data.marks)
+          && request.resource.data.correctCount == correctOf(request.resource.data.marks)
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.auditId != resource.data.auditId
+          && auditFor(request.resource.data)
+          && totalsMatch(w, sid, resource.data.classIdAtEntry,
+               request.resource.data.points - resource.data.points,
+               request.resource.data.correctCount - resource.data.correctCount, 0,
+               full(request.resource.data.points) - full(resource.data.points));
+      }
+    }
+
+    // ---------- سجل التدقيق: إضافة فقط، لا تعديل ولا حذف ----------
+    match /audit/{id} {
+      allow read: if isAdmin();
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['action', 'actor', 'target', 'before', 'after', 'at'])
+        && request.resource.data.actor == request.auth.uid
+        && request.resource.data.at == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---------- لوحة العرض العامة: قراءة للجميع، نشر للمديرة ----------
+    match /public/board {
+      allow read: if true;
+      allow write: if isAdmin()
+        && request.resource.data.keys().hasOnly(['weekNumber', 'topStudents', 'topClasses', 'fullMarks', 'publishedAt']);
+    }
+  }
+}
