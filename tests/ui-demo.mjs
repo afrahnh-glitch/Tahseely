@@ -19,18 +19,18 @@ page.on("console", (m) => { if (m.type() === "error" && !/Failed to load resourc
 const text = (sel) => page.locator(sel).first().innerText();
 const kpi = async (label) => Number((await page.locator(".kpi").filter({ has: page.locator(".k", { hasText: label }) }).locator(".v").innerText()).trim());
 
-await page.goto(BASE + "/index.html#dashboard");
+await page.goto(BASE + "/index.html?demo=1#dashboard");
 await page.waitForSelector(".kpi");
 check("شريط الوضع التجريبي ظاهر", await page.locator(".demo-bar").isVisible());
 const reg = await kpi("المسجلات"), part = await kpi("مشاركات الأسبوع"), non = await kpi("لم يشاركن");
 check("غير المشاركات = المسجلات − المشاركات (دون إدخال)", reg === 280 && non === reg - part, `${reg} − ${part} = ${non}`);
 check("المعلمة لا ترى روابط الإدارة", (await page.locator('.nav a[data-r="manage"]').count()) === 0);
-await page.goto(BASE + "/index.html#manage");
+await page.goto(BASE + "/index.html?demo=1#manage");
 await page.waitForTimeout(300);
 check("المعلمة تُعاد من صفحة الإدارة إلى الرئيسية", (await text("#pageTitle")) === "لوحة التحكم");
 
 // ----- فصل لم يبدأ رصده: ثالث ثانوي / 2 -----
-await page.goto(BASE + "/index.html#entry");
+await page.goto(BASE + "/index.html?demo=1#entry");
 await page.waitForSelector("#eGrade");
 await page.click('#eGrade button[data-g="3"]');
 await page.click('#eCls button[data-c="3-2"]');
@@ -66,7 +66,7 @@ check("المؤشر صار 2 من الفصل", (await text("#eCounter .big")) ==
 
 // ----- محاولة مشاركة مكررة (رُصدت من جهاز آخر أثناء فتح النافذة) -----
 const third = page.locator('.stu:has([data-act="record"])').first();
-const thirdId = (await third.locator(".nm small").innerText()).trim();
+const thirdId = (await third.getAttribute("id")).replace("row-", "");
 await third.locator('[data-act="record"]').click();
 await page.waitForSelector(".modal");
 await page.evaluate((id) => window.__demoStore.saveEntry({ weekId: "w08", studentId: id, marks: { p: true, c: false, b: false }, mode: "create" }), thirdId);
@@ -106,19 +106,19 @@ const otherCount = await page.locator(".stu", { hasText: "رصدتها" }).count
 check("مشاركات معلمة أخرى بلا زر تعديل للمعلمة", otherCount > 0, `${otherCount} صفوف`);
 await page.click('#eFilter button[data-f="all"]');
 
-// ----- البحث برقم في كل الفصول -----
-await page.fill("#eQ", thirdId);
+// ----- البحث بالاسم داخل الفصل -----
+const someName = await page.locator(".stu .nm b").nth(3).innerText();
+await page.fill("#eQ", someName.split(" ")[0].replace(/^ا/, "أ"));
 await page.waitForTimeout(150);
-await page.click('[data-act="findId"]');
-await page.waitForTimeout(500);
-check("البحث بالرقم ينقل إلى فصل الطالبة", (await page.locator('#eCls button[aria-pressed="true"]').innerText()).includes("2") && (await page.locator(".stu").count()) === 1);
+check("البحث بالاسم يجد الطالبة (مع تطبيع الهمزات)", (await page.locator(".stu", { hasText: someName }).count()) === 1);
+check("لا تظهر أرقام في قائمة الرصد", !/\d{5,}|\d-\d-\d{3}/.test(await page.locator("#eList").innerText()));
 await page.fill("#eQ", "");
 
 // ----- المديرة: أسبوع جديد بلا مشاركات -----
 await page.selectOption("#demoUser", "demo-admin");
 await page.waitForSelector('.nav a[data-r="weeks"]');
 check("المديرة ترى روابط الإدارة", (await page.locator('.nav a[data-r="manage"]').count()) === 1);
-await page.goto(BASE + "/index.html#weeks");
+await page.goto(BASE + "/index.html?demo=1#weeks");
 await page.waitForSelector("#wForm");
 await page.fill("#wKp", "ب"); await page.fill("#wKc", "د"); await page.fill("#wKb", "أ");
 await page.click("#wSave");
@@ -127,28 +127,28 @@ await page.click('[data-w="open"][data-id="w09"]');
 await page.waitForSelector('[data-w="current"][data-id="w09"]');
 await page.click('[data-w="current"][data-id="w09"]');
 await page.waitForTimeout(500);
-await page.goto(BASE + "/index.html#dashboard");
+await page.goto(BASE + "/index.html?demo=1#dashboard");
 await page.waitForSelector(".kpi");
 check("أسبوع جديد: 0 مشاركات و280 لم يشاركن", (await kpi("مشاركات الأسبوع")) === 0 && (await kpi("لم يشاركن")) === 280);
 const tops = await page.locator(".li .pts").first().innerText();
 check("النقاط السابقة باقية في الأسبوع الجديد", parseInt(tops, 10) > 0, tops);
 
 // ----- تغيير المفتاح بعد بدء الرصد يُسجَّل -----
-await page.goto(BASE + "/index.html#weeks");
+await page.goto(BASE + "/index.html?demo=1#weeks");
 await page.waitForSelector('[data-w="key"][data-id="w08"]');
 await page.click('[data-w="key"][data-id="w08"]');
 check("تحذير قفل المفتاح يظهر", (await text(".alert.warn")).includes("بدأ رصد"));
 await page.fill("#kEp", "ج");
 await page.click('[data-w="keySave"]');
 await page.waitForTimeout(500);
-await page.goto(BASE + "/index.html#audit");
+await page.goto(BASE + "/index.html?demo=1#audit");
 await page.waitForSelector("tbody tr");
 check("السجل يحوي تغيير المفتاح بعد بدء الرصد", (await page.locator("tbody").innerText()).includes("تغيير مفتاح بعد بدء الرصد"));
 
 // ----- نقل طالبة لها نقاط -----
 const mover = await page.evaluate(async () => (await window.__demoStore.topStudents({ classIds: ["1-1"], pageSize: 1 })).rows[0]);
 const classesBefore = await page.evaluate(() => window.__demoStore.listClasses());
-await page.goto(BASE + "/index.html#manage");
+await page.goto(BASE + "/index.html?demo=1#manage");
 await page.waitForSelector(`[data-e="${mover.id}"]`);
 await page.click(`[data-e="${mover.id}"]`);
 await page.waitForSelector("text=تعديل بيانات طالبة");
@@ -163,16 +163,44 @@ check("النقل لا يغيّر مجموع الطالبة", moved.classId === 
 check("النقل لا يغيّر نقاط الفصلين التاريخية", cb(classesAfter, "1-1").totalPoints === cb(classesBefore, "1-1").totalPoints && cb(classesAfter, "1-2").totalPoints === cb(classesBefore, "1-2").totalPoints);
 check("النقل يحدّث عدد المسجلات", cb(classesAfter, "1-1").activeCount === cb(classesBefore, "1-1").activeCount - 1 && cb(classesAfter, "1-2").activeCount === cb(classesBefore, "1-2").activeCount + 1);
 
-// ----- منع تكرار الرقم الطلابي -----
-await page.waitForSelector("#mId:not([readonly])");
-await page.fill("#mName", "تجربة مكررة الاسم");
-await page.fill("#mId", mover.id);
+// ----- إضافة اسم مكرر في الفصل: تنبيه قبل الحفظ -----
+await page.waitForSelector("text=إضافة طالبة");
+await page.selectOption("#mF", "1-2");
+await page.waitForSelector("#mBody tr td b");
+const dupName = await page.locator("#mBody tr td b").first().innerText();
+await page.fill("#mName", dupName);
+await page.selectOption("#mCls", "1-2");
 await page.click("#mSave");
 await page.waitForTimeout(500);
-check("إضافة رقم طلابي مكرر تُرفض", (await text("#mErr")).includes("مسجّل"));
+check("إضافة اسم موجود في الفصل تعرض تنبيهًا ولا تُحفظ", (await text("#mErr")).includes("اسم مطابق"));
+
+// ----- استيراد كشف PDF من نور -----
+const before12 = (await page.evaluate(() => window.__demoStore.listClasses())).find((c) => c.id === "1-3").activeCount;
+await page.setInputFiles("#impPdf", process.env.PDF);
+await page.waitForSelector("#impText", { timeout: 30000 });
+const lines = (await page.locator("#impText").inputValue()).split("\n").filter(Boolean);
+check("PDF: استُخرج 28 اسمًا", lines.length === 28, String(lines.length));
+check("PDF: اكتُشف الفصل أول ثانوي / 1", (await page.locator("#impCls").inputValue()) === "1-1");
+check("PDF: لا أرقام سجل مدني في الأسماء", lines.every((l) => !/\d/.test(l)));
+check("PDF: «عبدالله» سليمة", lines[0] === "أشواق صنيتان عبدالله السالمي الحربي", lines[0]);
+await page.selectOption("#impCls", "1-3");
+await page.waitForTimeout(400);
+check("PDF: المعاينة تعرض عدد الإضافة", (await text("#impCheck")).includes("28"));
+await page.click("#impGo");
+await page.waitForSelector("text=إضافة طالبة");
+await page.waitForTimeout(400);
+const after12 = (await page.evaluate(() => window.__demoStore.listClasses())).find((c) => c.id === "1-3").activeCount;
+check("PDF: أُضيفت 28 طالبة للفصل المختار", after12 === before12 + 28, `${before12} → ${after12}`);
+// إعادة الاستيراد نفسه: كلها مسجّلة مسبقًا
+await page.setInputFiles("#impPdf", process.env.PDF);
+await page.waitForSelector("#impText", { timeout: 30000 });
+await page.selectOption("#impCls", "1-3");
+await page.waitForTimeout(400);
+check("PDF: إعادة الاستيراد تكتشف المسجّلات مسبقًا", (await text("#impCheck")).includes("28 مسجّلة مسبقًا") && (await page.locator("#impGo").isDisabled()));
+await page.click("#impCancel");
 
 // ----- ترتيب الطالبات والفصول -----
-await page.goto(BASE + "/index.html#students");
+await page.goto(BASE + "/index.html?demo=1#students");
 await page.waitForSelector("#rBody tr td .rank");
 const cols = await page.locator("#rHead th").allInnerTexts();
 check("أعمدة الترتيب كاملة", ["المركز", "الطالبة", "الصف / الفصل", "المجموع التراكمي", "المشاركات", "الإجابات الصحيحة"].every((c) => cols.includes(c)));
@@ -183,29 +211,29 @@ await page.waitForTimeout(400);
 const weekRows = await page.locator("#rBody tr").count();
 const wk8 = await page.evaluate(() => window.__demoStore.getWeek("w08"));
 check("عرض مشاركات الأسبوع يضم المشاركات فقط", weekRows === wk8.participants, `${weekRows} صفًا = ${wk8.participants} مشاركة`);
-await page.goto(BASE + "/index.html#classes");
+await page.goto(BASE + "/index.html?demo=1#classes");
 await page.waitForSelector(".cls-row");
 const avgs = await page.locator(".cls-row .avg").allInnerTexts();
 const nums = avgs.map((t) => parseFloat(t));
 check("الفصول مرتبة تنازليًا بالمتوسط لكل مسجلة", nums.length === 9 && nums.every((v, i) => i === 0 || v <= nums[i - 1]));
 
 // ----- لوحة العرض العامة -----
-await page.goto(BASE + "/index.html#weeks");
+await page.goto(BASE + "/index.html?demo=1#weeks");
 await page.waitForSelector("#wPublish");
 await page.click("#wPublish");
 await page.waitForTimeout(600);
 const disp = await ctx.newPage();
-await disp.goto(BASE + "/display.html");
+await disp.goto(BASE + "/display.html?demo=1");
 await disp.waitForSelector(".brow");
 const dtext = await disp.locator("body").innerText();
 check("شاشة العرض تعرض 10 طالبات", (await disp.locator(".panel").first().locator(".brow").count()) === 10);
-check("شاشة العرض بلا أرقام طلابية", !/\b26\d{5}\b/.test(dtext));
+check("شاشة العرض بلا أرقام أو رموز طلابية", !/\d{5,}|\d-\d-\d{3}/.test(dtext));
 check("شاشة العرض بلا حقول أو أزرار تعديل", (await disp.locator("input, select, button, form").count()) === 0);
 
 // ----- الجوال: لا تمرير أفقي، والنافذة ظاهرة -----
 const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 const p2 = await phone.newPage();
-await p2.goto(BASE + "/index.html#entry");
+await p2.goto(BASE + "/index.html?demo=1#entry");
 await p2.waitForSelector(".stu");
 const overflow = await p2.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 check("الجوال: لا تمرير أفقي في شاشة الرصد", overflow <= 1, `فرق ${overflow}px`);
@@ -217,7 +245,7 @@ check("الجوال: زر الحفظ داخل الشاشة وارتفاعه ≥ 
 // ----- لقطات للمراجعة -----
 const ipad = await browser.newContext({ viewport: { width: 1180, height: 820 } });
 const p3 = await ipad.newPage();
-await p3.goto(BASE + "/index.html#entry");
+await p3.goto(BASE + "/index.html?demo=1#entry");
 await p3.waitForSelector(".stu");
 await p3.screenshot({ path: "tests/shot-ipad-entry.png" });
 await p3.locator('.stu [data-act="record"]').first().click();

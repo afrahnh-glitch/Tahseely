@@ -4,7 +4,9 @@ import { firebaseConfig } from "./firebase-config.js";
 export const FIREBASE_VERSION = "11.10.0";
 const CDN = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
 
-export const isConfigured = () => !!(firebaseConfig && firebaseConfig.apiKey && firebaseConfig.projectId);
+// ?demo=1 في الرابط يفتح الوضع التجريبي ببيانات وهمية (للتدريب والاختبار)، ولا يلمس Firebase.
+const forceDemo = typeof location !== "undefined" && new URLSearchParams(location.search).has("demo");
+export const isConfigured = () => !forceDemo && !!(firebaseConfig && firebaseConfig.apiKey && firebaseConfig.projectId);
 
 let cached = null;
 export async function loadFirebase() {

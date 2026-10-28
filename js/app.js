@@ -2,7 +2,7 @@
 import { isConfigured, loadFirebase } from "./boot.js";
 import { createFirestoreStore } from "./store-firestore.js";
 import { createDemoStore } from "./store-demo.js";
-import { CLASSES, GRADES, parseCSV, validateImport, toLatinDigits } from "./store-common.js";
+import { CLASSES, GRADES, parseCSV, validateImport, cleanName } from "./store-common.js";
 import { DOMAINS, scoreMarks, rankRows, normalizeArabic, WEEKLY_MAX } from "./scoring.js";
 
 /* ======================= أدوات ======================= */
@@ -296,7 +296,7 @@ async function viewEntry(view) {
   <div class="card entry-top">
     <div class="row">
       <label class="fl">الأسبوع<select id="eWeek">${weekOptions(E.weekId, !isAdmin())}</select></label>
-      <label class="fl">بحث بالاسم أو الرقم الطلابي<input type="search" id="eQ" placeholder="مثال: ريم أو 2610…" value="${esc(E.q)}" autocomplete="off" inputmode="search"></label>
+      <label class="fl">بحث باسم الطالبة<input type="search" id="eQ" placeholder="اكتبي جزءًا من الاسم" value="${esc(E.q)}" autocomplete="off" inputmode="search"></label>
     </div>
     <div class="fl">الصف<div class="seg" id="eGrade">${GRADES.map((g) => `<button type="button" data-g="${g.grade}" aria-pressed="${g.grade === E.grade}">${g.name}</button>`).join("")}</div></div>
     <div class="fl">الفصل<div class="seg" id="eCls"></div></div>
@@ -337,9 +337,9 @@ async function loadClass() {
 }
 
 function visibleStudents() {
-  const q = normalizeArabic(toLatinDigits(E.q));
+  const q = normalizeArabic(E.q);
   return E.students.filter((s) => {
-    if (q && !(s.nameNorm || normalizeArabic(s.name)).includes(q) && !s.id.startsWith(q)) return false;
+    if (q && !(s.nameNorm || normalizeArabic(s.name)).includes(q)) return false;
     const has = !!E.entries[s.id];
     return E.filter === "all" || (E.filter === "done" ? has : !has);
   });
@@ -352,10 +352,8 @@ function renderList() {
   const done = E.students.filter((s) => E.entries[s.id]).length;
   $("#eCounter").innerHTML = `<span class="big">${done} من ${total}</span><span>شاركت من طالبات ${clsLabel(E.cid)}</span><div class="bar"><i style="width:${total ? (done / total) * 100 : 0}%"></i></div><span class="muted small">لم يشاركن: ${total - done}</span>`;
   const rows = visibleStudents();
-  const q = toLatinDigits(E.q).trim();
   if (!rows.length) {
-    const idSearch = /^\d{4,}$/.test(q);
-    list.innerHTML = `<div class="card empty">${IC.done}<b>${E.q ? "لا توجد طالبة بهذا البحث في هذا الفصل" : E.filter === "todo" ? "كل طالبات الفصل مرصودات" : "لا توجد مشاركات مرصودة بعد في هذا الفصل"}</b>${idSearch ? `<button class="btn btn-ghost" data-act="findId">البحث بالرقم ${esc(q)} في كل الفصول</button>` : ""}</div>`;
+    list.innerHTML = `<div class="card empty">${IC.done}<b>${E.q ? "لا توجد طالبة بهذا الاسم في هذا الفصل" : !E.students.length ? "لا توجد طالبات مسجلات في هذا الفصل" : E.filter === "todo" ? "كل طالبات الفصل مرصودات" : "لا توجد مشاركات مرصودة بعد في هذا الفصل"}</b></div>`;
     return;
   }
   list.innerHTML = rows.map((s) => {
@@ -365,26 +363,13 @@ function renderList() {
       ? `<button type="button" class="btn btn-primary" data-act="record" data-s="${s.id}">${IC.plus}<span class="lbl">رصد مشاركة</span></button>`
       : canEdit(en) ? `<button type="button" class="btn btn-ghost" data-act="edit" data-s="${s.id}">${IC.edit}<span class="lbl">تعديل</span></button>`
       : `<span class="muted small">رصدتها ${esc(userName(en.recordedBy))}</span>`;
-    return `<div class="stu${en ? " done" : ""}" id="row-${s.id}"><div class="nm"><b>${esc(s.name)}</b><small class="num">${s.id}</small></div><span class="st">${status}</span>${action}</div>`;
+    return `<div class="stu${en ? " done" : ""}" id="row-${s.id}"><div class="nm"><b>${esc(s.name)}</b></div><span class="st">${status}</span>${action}</div>`;
   }).join("");
 }
 function userName(u) { if (u === S.uid) return "أنتِ"; return (S.usersById[u] && S.usersById[u].name) || "معلمة أخرى"; }
 
 async function onListClick(e) {
   const b = e.target.closest("[data-act]"); if (!b) return;
-  if (b.dataset.act === "findId") {
-    const id = toLatinDigits(E.q).trim();
-    await busy(b, async () => {
-      const s = await S.store.getStudent(id);
-      if (!s) { toast("لا توجد طالبة بهذا الرقم.", "err"); return; }
-      E.grade = +s.classId[0]; E.cid = s.classId; E.filter = "all";
-      document.querySelectorAll("#eGrade button").forEach((x) => x.setAttribute("aria-pressed", +x.dataset.g === E.grade));
-      document.querySelectorAll("#eFilter button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.f === "all"));
-      await loadClass();
-      toast(`الطالبة في ${clsLabel(s.classId)}`);
-    });
-    return;
-  }
   const s = E.students.find((x) => x.id === b.dataset.s);
   if (b.dataset.act === "record") openModal(s, "create");
   if (b.dataset.act === "edit") openModal(s, "edit", E.entries[s.id]);
@@ -418,7 +403,7 @@ function renderModal() {
   const allC = complete && sc.correctCount === 3;
   const COLORS = { p: "#0B6B73", c: "#2F4F8F", b: "#3D7A45" };
   ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
-    <div class="modal-head"><div><small>${M.mode === "edit" ? "تعديل مشاركة" : "رصد مشاركة"} · الأسبوع ${w.number}</small><h3 id="mTitle">${esc(M.student.name)}</h3><small><span class="num">${M.student.id}</span> · ${clsLabel(M.existing ? M.existing.classIdAtEntry : M.student.classId)}</small></div>
+    <div class="modal-head"><div><small>${M.mode === "edit" ? "تعديل مشاركة" : "رصد مشاركة"} · الأسبوع ${w.number}</small><h3 id="mTitle">${esc(M.student.name)}</h3><small>${clsLabel(M.existing ? M.existing.classIdAtEntry : M.student.classId)}</small></div>
       <button type="button" class="xbtn" data-m="close" aria-label="إغلاق"${M.saving ? " disabled" : ""}>${IC.x}</button></div>
     ${w.answerKey ? `<div class="keyref">مفتاح الإجابة: ${DOMAINS.map((d) => `<span>${d.name}: ${esc(w.answerKey[d.key])}</span>`).join("")}</div>` : ""}
     <div>${DOMAINS.map((d) => { const v = m[d.key]; return `<div class="dom"><div class="dn"><i style="background:${COLORS[d.key]}">${d.letter}</i>${d.name}</div>
@@ -570,7 +555,9 @@ async function viewClasses(view) {
 }
 
 /* ======================= إدارة الطالبات ======================= */
-const MG = { cid: "1-1", q: "", edit: null, rows: [], preview: null };
+const MG = { cid: "1-1", q: "", edit: null, rows: [], csv: null, imp: null };
+// imp = { classId, source: "pdf"|"paste", fileName, detected: {grade, section}, text }
+
 async function viewManage(view) {
   const g = G;
   await refreshBasics();
@@ -579,26 +566,22 @@ async function viewManage(view) {
   view.innerHTML = `
   <div class="two"><div class="grid">
     <div class="card"><h2>${s ? "تعديل بيانات طالبة" : "إضافة طالبة"}</h2><form class="form" id="mForm" novalidate>
-      <label class="fl">الاسم الثلاثي<input type="text" id="mName" value="${s ? esc(s.name) : ""}" placeholder="الاسم الأول واسم الأب والعائلة"></label>
-      <label class="fl">الرقم الطلابي<input type="text" id="mId" inputmode="numeric" value="${s ? s.id : ""}"${s ? " readonly" : ""}></label>
+      <label class="fl">اسم الطالبة<input type="text" id="mName" value="${s ? esc(s.name) : ""}" placeholder="الاسم كما في الكشف"></label>
       <label class="fl">الصف والفصل<select id="mCls">${CLASSES.map((c) => `<option value="${c.id}"${(s ? s.classId : MG.cid) === c.id ? " selected" : ""}>${c.label}</option>`).join("")}</select></label>
       ${s ? '<p class="muted small" style="margin:0">نقل الطالبة لا يغيّر نقاطها، ومشاركاتها السابقة تبقى محسوبة لفصلها وقت المشاركة.</p>' : ""}
       <div class="err" id="mErr"></div>
       <div class="mactions"><button type="submit" class="btn btn-primary" id="mSave">${s ? "حفظ التعديل" : "إضافة الطالبة"}</button>${s ? `<button type="button" class="btn ${s.active ? "btn-danger" : "btn-ghost"}" id="mToggle">${s.active ? "إيقاف الطالبة" : "تفعيل الطالبة"}</button><button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>` : ""}</div>
       <div id="mConfirm"></div>
     </form></div>
-    <div class="card"><h2>استيراد من CSV</h2>
-      <div class="drop"><b>ملف CSV بترميز UTF-8</b><span>الأعمدة بالترتيب:</span>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center"><code>الاسم</code><code>الرقم الطلابي</code><code>الصف (1 أو أول)</code><code>الفصل (1–3)</code></div>
-        <span class="small">من Excel: «حفظ باسم» ← CSV UTF-8.</span>
-        <input type="file" id="mFile" accept=".csv,text/csv"></div>
-      <div id="mPreview"></div></div>
     <div class="card"><h2>الفصول التسعة</h2><div class="list">${S.classes.map((c) => `<div class="li"><div class="who"><b>${c.label}</b><small>${c.activeCount} مسجلة · ${c.totalPoints} نقطة</small></div></div>`).join("")}</div></div>
   </div>
-  <div class="card"><h2>قائمة الطالبات <span class="sub" id="mCount"></span></h2>
-    <div class="toolbar" style="margin-bottom:12px"><label class="fl">الفصل<select id="mF">${CLASSES.map((c) => `<option value="${c.id}"${MG.cid === c.id ? " selected" : ""}>${c.label}</option>`).join("")}</select></label>
-      <label class="fl">بحث<input type="search" id="mQ" value="${esc(MG.q)}" placeholder="الاسم أو الرقم"></label></div>
-    <div class="tablewrap"><table><thead><tr><th>الطالبة</th><th>الرقم الطلابي</th><th>الحالة</th><th>المجموع</th><th>المشاركات</th><th></th></tr></thead><tbody id="mBody"></tbody></table></div></div></div>`;
+  <div class="grid">
+    <div class="card" id="impCard"></div>
+    <div class="card"><h2>قائمة الطالبات <span class="sub" id="mCount"></span></h2>
+      <div class="toolbar" style="margin-bottom:12px"><label class="fl">الفصل<select id="mF">${CLASSES.map((c) => `<option value="${c.id}"${MG.cid === c.id ? " selected" : ""}>${c.label}</option>`).join("")}</select></label>
+        <label class="fl">بحث<input type="search" id="mQ" value="${esc(MG.q)}" placeholder="اسم الطالبة"></label></div>
+      <div class="tablewrap"><table style="min-width:520px"><thead><tr><th>الطالبة</th><th>الحالة</th><th>المجموع</th><th>المشاركات</th><th></th></tr></thead><tbody id="mBody"></tbody></table></div></div>
+  </div></div>`;
   $("#mF").onchange = (e) => { MG.cid = e.target.value; loadManageList(); };
   $("#mQ").oninput = (e) => { MG.q = e.target.value; drawManageList(); };
   if ($("#mCancel")) $("#mCancel").onclick = () => { MG.edit = null; viewManage(view); };
@@ -611,57 +594,154 @@ async function viewManage(view) {
   };
   $("#mForm").onsubmit = (e) => {
     e.preventDefault();
-    const name = $("#mName").value.replace(/\s+/g, " ").trim();
-    const id = toLatinDigits($("#mId").value).replace(/\D/g, "");
+    const name = cleanName($("#mName").value);
     const classId = $("#mCls").value;
     if (name.split(" ").length < 2) return ($("#mErr").textContent = "اكتبي الاسم الثنائي على الأقل.");
-    if (!s && !id) return ($("#mErr").textContent = "اكتبي الرقم الطلابي.");
     busy($("#mSave"), async () => {
       try {
         offlineGuard();
         if (s) { await withTimeout(S.store.updateStudent(s.id, { name, classId })); toast("حُفظ التعديل"); MG.edit = null; MG.cid = classId; }
-        else { await withTimeout(S.store.addStudent({ id, name, classId })); toast(`أُضيفت ${name.split(" ")[0]} إلى ${clsLabel(classId)}`); MG.cid = classId; }
+        else {
+          const names = await S.store.classNameSet(classId);
+          if (names.has(normalizeArabic(name)) && !$("#mErr").dataset.confirmDup) {
+            $("#mErr").dataset.confirmDup = "1";
+            $("#mErr").textContent = "يوجد اسم مطابق في هذا الفصل. اضغطي «إضافة الطالبة» مرة أخرى إن كانت طالبة مختلفة.";
+            return;
+          }
+          await withTimeout(S.store.addStudent({ name, classId })); toast(`أُضيفت ${name.split(" ")[0]} إلى ${clsLabel(classId)}`); MG.cid = classId;
+        }
         viewManage(view);
       } catch (err) { $("#mErr").textContent = err.message; }
     });
   };
-  $("#mFile").onchange = async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    $("#mPreview").innerHTML = '<div class="loading">جارٍ قراءة الملف…</div>';
-    try {
-      const text = await f.text();
-      const existing = await S.store.existingStudentIds();
-      MG.preview = validateImport(parseCSV(text), existing);
-      drawPreview(view);
-    } catch (err) { $("#mPreview").innerHTML = `<div class="alert err">تعذّرت قراءة الملف: ${esc(err.message)}</div>`; }
-  };
-  $("#mBody").onclick = (e) => { const b = e.target.closest("[data-e]"); if (!b) return; MG.edit = MG.rows.find((r) => r.id === b.dataset.e); viewManage(view); };
+  $("#mBody").onclick = (e) => { const b = e.target.closest("[data-e]"); if (!b) return; MG.edit = MG.rows.find((r) => r.id === b.dataset.e); viewManage(view); window.scrollTo(0, 0); };
+  drawImport(view);
   loadManageList();
 }
+
+/* ---------- استيراد كشف فصل (PDF أو لصق) ---------- */
+function impNames() { return (MG.imp.text || "").split("\n").map(cleanName).filter((n) => n.length); }
+
+async function drawImport(view) {
+  const card = $("#impCard"); if (!card) return;
+  if (!MG.imp) {
+    card.innerHTML = `<h2>استيراد كشف فصل</h2>
+      <p class="muted small" style="margin-top:0">ارفعي «كشف أسماء الطالبات بالفصل» من نور بصيغة PDF، فصلًا في كل مرة. يُقرأ الاسم فقط، ولا يُقرأ رقم السجل المدني ولا يُحفظ.</p>
+      <div class="drop"><b>ملف PDF لفصل واحد</b><input type="file" id="impPdf" accept="application/pdf,.pdf"></div>
+      <div class="mactions" style="margin-top:12px"><button type="button" class="btn btn-ghost" id="impPaste">لصق الأسماء يدويًا</button><button type="button" class="btn btn-ghost" id="impCsvBtn">ملف CSV لعدة فصول</button></div>
+      <div id="impMsg"></div>
+      <div id="csvBox" hidden><div class="drop" style="margin-top:12px"><span>الأعمدة بالترتيب: <code>الاسم</code> <code>الصف (1 أو أول)</code> <code>الفصل (1–3)</code></span><input type="file" id="mFile" accept=".csv,text/csv"></div><div id="mPreview"></div></div>`;
+    $("#impPdf").onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      $("#impMsg").innerHTML = '<div class="loading">جارٍ قراءة الكشف…</div>';
+      try {
+        const { extractNamesFromPdf } = await import("./pdf-names.js");
+        const r = await extractNamesFromPdf(await f.arrayBuffer());
+        if (!r.names.length) { $("#impMsg").innerHTML = '<div class="alert warn">لم أجد أسماء في هذا الملف. جرّبي «لصق الأسماء يدويًا»، أو تأكدي أنه كشف أسماء الفصل من نور.</div>'; return; }
+        const cid = r.grade && r.section >= 1 && r.section <= 3 ? `${r.grade}-${r.section}` : null;
+        MG.imp = { classId: cid || MG.cid, detected: !!cid, source: "pdf", fileName: f.name, text: r.names.join("\n") };
+        drawImport(view);
+      } catch (err) { $("#impMsg").innerHTML = `<div class="alert err">تعذّرت قراءة الملف (${esc(err.message || "")}). جرّبي «لصق الأسماء يدويًا».</div>`; }
+    };
+    $("#impPaste").onclick = () => { MG.imp = { classId: MG.cid, detected: false, source: "paste", fileName: "", text: "" }; drawImport(view); };
+    $("#impCsvBtn").onclick = () => { $("#csvBox").hidden = !$("#csvBox").hidden; };
+    $("#mFile").onchange = (e) => onCsv(e, view);
+    return;
+  }
+  const im = MG.imp;
+  card.innerHTML = `<h2>${im.source === "pdf" ? "مراجعة الكشف" : "لصق أسماء فصل"} <span class="sub">${im.fileName ? esc(im.fileName) : ""}</span></h2>
+    <div class="form">
+      <label class="fl">الفصل الذي ستُضاف إليه الأسماء<select id="impCls">${CLASSES.map((c) => `<option value="${c.id}"${im.classId === c.id ? " selected" : ""}>${c.label}</option>`).join("")}</select></label>
+      ${im.source === "pdf" ? (im.detected ? `<div class="note">${IC.info}<span>اكتُشف الفصل من رأس الكشف: <b>${clsLabel(im.classId)}</b>. غيّريه إن لم يكن صحيحًا.</span></div>` : `<div class="alert warn">لم أستطع تحديد الفصل من الكشف. اختاريه بنفسكِ.</div>`) : ""}
+      <label class="fl">الأسماء: اسم في كل سطر. صحّحي أي اسم أو احذفي أي سطر ليس اسمًا.<textarea id="impText" rows="12" style="border:1px solid var(--line);border-radius:var(--radius-s);padding:10px 12px;font:inherit;font-size:15px;line-height:1.9;width:100%;resize:vertical">${esc(im.text)}</textarea></label>
+      <div id="impCheck"></div>
+      <div class="mactions"><button type="button" class="btn btn-primary" id="impGo">استيراد</button><button type="button" class="btn btn-ghost" id="impCancel">إلغاء</button></div>
+    </div>`;
+  $("#impCls").onchange = (e) => { im.classId = e.target.value; checkImport(); };
+  $("#impText").oninput = (e) => { im.text = e.target.value; checkImport(); };
+  $("#impCancel").onclick = () => { MG.imp = null; drawImport(view); };
+  $("#impGo").onclick = (e) => busy(e.currentTarget, async () => {
+    const r = await checkImport();
+    if (!r || !r.toAdd.length) return;
+    try {
+      offlineGuard();
+      await withTimeout(S.store.importStudents(im.classId, r.toAdd), 60000);
+      toast(`استُوردت ${r.toAdd.length} طالبة إلى ${clsLabel(im.classId)}`);
+      MG.cid = im.classId; MG.imp = null; viewManage(view);
+    } catch (err) { $("#impCheck").innerHTML = `<div class="alert err">${esc(err.message)}</div>`; }
+  });
+  checkImport();
+}
+
+let impCheckSeq = 0;
+async function checkImport() {
+  const el = $("#impCheck"); if (!el || !MG.imp) return null;
+  const seq = ++impCheckSeq;
+  const names = impNames();
+  let existing;
+  try { existing = await S.store.classNameSet(MG.imp.classId); } catch (e) { el.innerHTML = `<div class="alert err">${esc(e.message)}</div>`; return null; }
+  if (seq !== impCheckSeq) return null;
+  const seen = new Set(), toAdd = [], skipped = [], short = [], dupFile = [];
+  for (const n of names) {
+    const k = normalizeArabic(n);
+    if (n.split(" ").length < 2) short.push(n);
+    else if (seen.has(k)) dupFile.push(n);
+    else if (existing.has(k)) skipped.push(n);
+    else toAdd.push(n);
+    seen.add(k);
+  }
+  const lines = [];
+  lines.push(`<b>${toAdd.length}</b> اسمًا سيُضاف إلى ${clsLabel(MG.imp.classId)}.`);
+  if (skipped.length) lines.push(`${skipped.length} مسجّلة مسبقًا في الفصل وستُتجاهل: ${skipped.map(esc).join("، ")}`);
+  if (dupFile.length) lines.push(`${dupFile.length} مكررة في القائمة وستُضاف مرة واحدة: ${dupFile.map(esc).join("، ")}`);
+  if (short.length) lines.push(`${short.length} سطر ليس اسمًا كاملًا وسيُتجاهل: ${short.map(esc).join("، ")}`);
+  el.innerHTML = `<div class="alert ${skipped.length || dupFile.length || short.length ? "warn" : "ok"}">${lines.map((l) => `<div>${l}</div>`).join("")}</div>`;
+  const go = $("#impGo"); if (go && !go.classList.contains("busy")) go.disabled = !toAdd.length;
+  return { toAdd };
+}
+
+async function onCsv(e, view) {
+  const f = e.target.files[0]; if (!f) return;
+  $("#mPreview").innerHTML = '<div class="loading">جارٍ قراءة الملف…</div>';
+  try {
+    const text = await f.text();
+    const rows = parseCSV(text);
+    const classIds = [...new Set(CLASSES.map((c) => c.id))];
+    const existing = new Map(await Promise.all(classIds.map(async (cid) => [cid, await S.store.classNameSet(cid)])));
+    MG.csv = validateImport(rows, existing, normalizeArabic);
+    drawCsvPreview(view);
+  } catch (err) { $("#mPreview").innerHTML = `<div class="alert err">تعذّرت قراءة الملف: ${esc(err.message)}</div>`; }
+}
+function drawCsvPreview(view) {
+  const p = MG.csv;
+  const ok = p.filter((r) => r.status === "new");
+  const counts = { exists: p.filter((r) => r.status === "exists").length, dup: p.filter((r) => r.status === "dup-file").length, err: p.filter((r) => r.status === "error").length };
+  const tag = { new: '<span class="tag ok">جديدة</span>', exists: '<span class="tag wait">مسجّلة مسبقًا</span>', "dup-file": '<span class="tag bad">مكررة في الملف</span>', error: '<span class="tag bad">خطأ</span>' };
+  $("#mPreview").innerHTML = `<div class="alert ${counts.err || counts.dup ? "warn" : "ok"}" style="margin-top:12px"><div><b>${ok.length}</b> جديدة · ${counts.exists} مسجّلة مسبقًا (تُتجاهل) · ${counts.dup} مكررة في الملف · ${counts.err} بها خطأ</div>
+    ${ok.length ? `<div class="actions"><button type="button" class="btn btn-primary btn-sm" id="mImport">استيراد ${ok.length} طالبة</button></div>` : ""}</div>
+    <div class="tablewrap" style="margin-top:10px;max-height:300px"><table style="min-width:420px"><thead><tr><th>السطر</th><th>الاسم</th><th>الفصل</th><th>الحالة</th></tr></thead><tbody>${p.map((r) => `<tr><td class="n">${r.line}</td><td>${esc(r.name)}</td><td>${r.classId ? clsShort(r.classId) : "—"}</td><td>${tag[r.status]} <span class="muted small">${esc(r.note)}</span></td></tr>`).join("")}</tbody></table></div>`;
+  if ($("#mImport")) $("#mImport").onclick = (e) => busy(e.currentTarget, async () => {
+    try {
+      offlineGuard();
+      const byClass = {};
+      ok.forEach((r) => (byClass[r.classId] = byClass[r.classId] || []).push(r.name));
+      for (const [cid, names] of Object.entries(byClass)) await withTimeout(S.store.importStudents(cid, names), 60000);
+      toast(`استُوردت ${ok.length} طالبة`); MG.csv = null; viewManage(view);
+    } catch (err) { toast(err.message, "err"); }
+  });
+}
+
 async function loadManageList() {
   if (!$("#mBody")) return;
-  $("#mBody").innerHTML = '<tr><td colspan="6" class="muted">جارٍ التحميل…</td></tr>';
+  $("#mBody").innerHTML = '<tr><td colspan="5" class="muted">جارٍ التحميل…</td></tr>';
   try { MG.rows = await S.store.classStudents(MG.cid); if ($("#mBody")) drawManageList(); }
-  catch (e) { if ($("#mBody")) $("#mBody").innerHTML = `<tr><td colspan="6"><div class="alert err">${esc(e.message)}</div></td></tr>`; }
+  catch (e) { if ($("#mBody")) $("#mBody").innerHTML = `<tr><td colspan="5"><div class="alert err">${esc(e.message)}</div></td></tr>`; }
 }
 function drawManageList() {
-  const q = normalizeArabic(toLatinDigits(MG.q));
-  const rows = MG.rows.filter((s) => !q || normalizeArabic(s.name).includes(q) || s.id.startsWith(q));
+  const q = normalizeArabic(MG.q);
+  const rows = MG.rows.filter((s) => !q || normalizeArabic(s.name).includes(q));
   $("#mCount").textContent = `${rows.length} طالبة في ${clsLabel(MG.cid)}`;
-  $("#mBody").innerHTML = rows.map((s) => `<tr><td><b>${esc(s.name)}</b></td><td class="n">${s.id}</td><td>${s.active ? '<span class="tag ok">مفعّلة</span>' : '<span class="tag wait">موقوفة</span>'}</td><td class="n">${s.totalPoints}</td><td class="n">${s.participations}</td><td><button type="button" class="linkbtn" data-e="${s.id}">تعديل</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">لا توجد طالبات</td></tr>';
-}
-function drawPreview(view) {
-  const p = MG.preview;
-  const ok = p.filter((r) => r.status === "new");
-  const counts = { new: ok.length, exists: p.filter((r) => r.status === "exists").length, dup: p.filter((r) => r.status === "dup-file").length, err: p.filter((r) => r.status === "error").length };
-  const tag = { new: '<span class="tag ok">جديدة</span>', exists: '<span class="tag wait">مسجّلة مسبقًا</span>', "dup-file": '<span class="tag bad">مكررة في الملف</span>', error: '<span class="tag bad">خطأ</span>' };
-  $("#mPreview").innerHTML = `<div class="alert ${counts.err || counts.dup ? "warn" : "ok"}" style="margin-top:12px"><div><b>${counts.new}</b> جديدة · ${counts.exists} مسجّلة مسبقًا (تُتجاهل) · ${counts.dup} مكررة في الملف · ${counts.err} بها خطأ</div>
-    ${counts.new ? `<div class="actions"><button type="button" class="btn btn-primary btn-sm" id="mImport">استيراد ${counts.new} طالبة</button></div>` : ""}</div>
-    <div class="tablewrap" style="margin-top:10px;max-height:300px"><table style="min-width:480px"><thead><tr><th>السطر</th><th>الاسم</th><th>الرقم</th><th>الفصل</th><th>الحالة</th></tr></thead><tbody>${p.map((r) => `<tr><td class="n">${r.line}</td><td>${esc(r.name)}</td><td class="n">${esc(r.id)}</td><td>${r.classId ? clsShort(r.classId) : "—"}</td><td>${tag[r.status]} <span class="muted small">${esc(r.note)}</span></td></tr>`).join("")}</tbody></table></div>`;
-  if ($("#mImport")) $("#mImport").onclick = (e) => busy(e.currentTarget, async () => {
-    try { offlineGuard(); await withTimeout(S.store.importStudents(ok.map((r) => ({ id: r.id, name: r.name, classId: r.classId }))), 60000); toast(`استُوردت ${ok.length} طالبة`); MG.preview = null; viewManage(view); }
-    catch (err) { toast(err.message, "err"); }
-  });
+  $("#mBody").innerHTML = rows.map((s) => `<tr><td><b>${esc(s.name)}</b></td><td>${s.active ? '<span class="tag ok">مفعّلة</span>' : '<span class="tag wait">موقوفة</span>'}</td><td class="n">${s.totalPoints}</td><td class="n">${s.participations}</td><td><button type="button" class="linkbtn" data-e="${esc(s.id)}">تعديل</button></td></tr>`).join("") || '<tr><td colspan="5" class="muted">لا توجد طالبات في هذا الفصل بعد</td></tr>';
 }
 
 /* ======================= الأسابيع والمفاتيح ======================= */

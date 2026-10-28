@@ -4,7 +4,7 @@
 // قواعد firestore.rules تتحقق من كل رقم على الخادم وترفض أي قيمة لا تطابق القاعدة.
 
 import { scoreMarks, entryDelta, WEEKLY_MAX, publicName, normalizeArabic } from "./scoring.js";
-import { CLASSES, StoreError } from "./store-common.js";
+import { CLASSES, StoreError, studentCode } from "./store-common.js";
 
 export function createFirestoreStore({ fs, db, getUid, getRole }) {
   const {
@@ -162,17 +162,9 @@ export function createFirestoreStore({ fs, db, getUid, getRole }) {
       } catch (e) { throw mapError(e); }
     },
 
-    async addStudent({ id, name, classId }) {
-      id = String(id).trim();
-      try {
-        await runTransaction(db, async (tx) => {
-          const ex = await tx.get(studentRef(id));
-          if (ex.exists()) throw new StoreError("duplicate-id", `الرقم الطلابي ${id} مسجّل باسم ${ex.data().name}.`);
-          tx.set(studentRef(id), { name, nameNorm: normalizeArabic(name), classId, active: true, totalPoints: 0, participations: 0, correctCount: 0, createdAt: serverTimestamp() });
-          tx.update(classRef(classId), { activeCount: increment(1) });
-          auditDoc(tx, "student.create", `students/${id}`, null, { name, classId });
-        });
-      } catch (e) { throw mapError(e); }
+    async addStudent({ name, classId }) {
+      const ids = await this.importStudents(classId, [name]);
+      return ids[0];
     },
 
     async updateStudent(id, { name, classId, active }) {
@@ -201,26 +193,39 @@ export function createFirestoreStore({ fs, db, getUid, getRole }) {
       } catch (e) { throw mapError(e); }
     },
 
-    async existingStudentIds() {
-      const qs = await getDocs(collection(db, "students"));
-      return new Set(qs.docs.map((d) => d.id));
+    /** أسماء طالبات فصل (مطبَّعة) لكشف التكرار قبل الاستيراد. */
+    async classNameSet(cid) {
+      const rows = list(await getDocs(query(collection(db, "students"), where("classId", "==", cid))));
+      return new Set(rows.map((r) => r.nameNorm || normalizeArabic(r.name)));
     },
 
-    async importStudents(rows) {
-      // rows: [{id, name, classId}] — تم التحقق منها في الواجهة.
+    /**
+     * استيراد أسماء فصل واحد في عملية واحدة. يولّد لكل طالبة رمزًا داخليًا
+     * (الفصل + تسلسل) ويحجز التسلسل في مستند الفصل، فلا يتكرر رمز أبدًا.
+     */
+    async importStudents(classId, names) {
+      if (!names.length) return [];
+      if (names.length > 150) throw new StoreError("too-many", "الحد 150 اسمًا في المرة الواحدة.");
       try {
-        for (let i = 0; i < rows.length; i += 200) {
-          const chunk = rows.slice(i, i + 200);
-          const b = writeBatch(db);
-          const perClass = {};
-          for (const r of chunk) {
-            b.set(studentRef(r.id), { name: r.name, nameNorm: normalizeArabic(r.name), classId: r.classId, active: true, totalPoints: 0, participations: 0, correctCount: 0, createdAt: serverTimestamp() });
-            perClass[r.classId] = (perClass[r.classId] || 0) + 1;
+        return await runTransaction(db, async (tx) => {
+          const cS = await tx.get(classRef(classId));
+          if (!cS.exists()) throw new StoreError("no-class", "الفصل غير موجود. هيّئي النظام أولًا.");
+          let seq = cS.data().nextSeq || 0;
+          const ids = [];
+          // نتأكد أن الرمز غير مستخدم (احتياطًا لبيانات أُدخلت قبل نظام التسلسل)
+          while (ids.length < names.length) {
+            seq++;
+            const id = studentCode(classId, seq);
+            if (!(await tx.get(studentRef(id))).exists()) ids.push(id);
           }
-          for (const [cid, n] of Object.entries(perClass)) b.update(classRef(cid), { activeCount: increment(n) });
-          b.set(doc(collection(db, "audit")), { action: "student.import", actor: uid(), target: "students", before: null, after: { count: chunk.length }, at: serverTimestamp() });
-          await b.commit();
-        }
+          names.forEach((name, i) => {
+            tx.set(studentRef(ids[i]), { name, nameNorm: normalizeArabic(name), classId, active: true, totalPoints: 0, participations: 0, correctCount: 0, createdAt: serverTimestamp() });
+          });
+          tx.update(classRef(classId), { nextSeq: seq, activeCount: increment(names.length) });
+          auditDoc(tx, names.length === 1 ? "student.create" : "student.import", names.length === 1 ? `students/${ids[0]}` : `classes/${classId}`, null,
+            names.length === 1 ? { name: names[0], classId } : { count: names.length, classId });
+          return ids;
+        });
       } catch (e) { throw mapError(e); }
     },
 

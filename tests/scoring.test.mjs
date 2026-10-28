@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { scoreMarks, entryDelta, rankRows, publicName } from "../js/scoring.js";
-import { parseCSV, validateImport } from "../js/store-common.js";
+import { parseCSV, validateImport, studentCode } from "../js/store-common.js";
 
 test("مجال واحد صحيح = 5 نقاط", () => {
   assert.deepEqual(scoreMarks({ p: true, c: false, b: false }), { correctCount: 1, bonus: 0, points: 5 });
@@ -40,11 +40,15 @@ test("التعادل يُعطي المركز نفسه دون نقاط إضافي
 test("اسم العرض العام بلا اسم الأب", () => {
   assert.equal(publicName("نورة عبدالله العتيبي"), "نورة العتيبي");
 });
-test("استيراد CSV: عناوين، مكرر، موجود مسبقًا، خطأ", () => {
-  const csv = "الاسم,الرقم الطلابي,الصف,الفصل\nنورة عبدالله العتيبي,1001,أول,1\nريم محمد السليم,1002,2,3\nلمى خالد البسام,1001,3,2\nهيا,1003,1,1\nجود سعد الزامل,1004,ثالث,4\nسارة فهد المطيري,٢٠٠٠,ثاني,٢";
-  const out = validateImport(parseCSV(csv), new Set(["1002"]));
+test("استيراد CSV بالاسم: عناوين، مكرر، موجود مسبقًا، خطأ", () => {
+  const norm = (t) => t.replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").trim();
+  const csv = "الاسم,الصف,الفصل\nنورة عبدالله العتيبي,أول,1\nريم محمد السليم,2,3\nنورة عبدالله العتيبي,1,1\nهيا,1,1\nجود سعد الزامل,ثالث,4\nسارة فهد المطيري,ثاني,٢";
+  const existing = new Map([["2-3", new Set([norm("ريم محمد السليم")])]]);
+  const out = validateImport(parseCSV(csv), existing, norm);
   assert.deepEqual(out.map((r) => r.status), ["new", "exists", "dup-file", "error", "error", "new"]);
   assert.equal(out[0].classId, "1-1");
-  assert.equal(out[5].id, "2000");
   assert.equal(out[5].classId, "2-2");
+});
+test("رمز الطالبة الداخلي", () => {
+  assert.equal(studentCode("1-2", 7), "1-2-007");
 });

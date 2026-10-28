@@ -44,29 +44,36 @@ const GRADE_WORDS = { "1": 1, "اول": 1, "أول": 1, "الاول": 1, "الأ
 const DIGITS = { "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4", "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9" };
 export const toLatinDigits = (t) => String(t || "").replace(/[٠-٩]/g, (d) => DIGITS[d]);
 
+/** الرمز الداخلي للطالبة: الفصل عند الإضافة + تسلسل، مثل 1-2-007. لا يُعرض للعامة. */
+export const studentCode = (classId, n) => `${classId}-${String(n).padStart(3, "0")}`;
+
+/** تنظيف اسم مُدخل أو مستخرج. */
+export const cleanName = (t) => String(t || "").replace(/[\u0640\u200e\u200f]/g, "").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
+
 /**
  * يحوّل صفوف CSV إلى طالبات مع حالة لكل صف.
- * الأعمدة بالترتيب: الاسم، الرقم الطلابي، الصف، الفصل. يُتجاهل صف العناوين إن وُجد.
+ * الأعمدة بالترتيب: الاسم، الصف، الفصل. يُتجاهل صف العناوين إن وُجد.
+ * existingNames: Map(classId → Set(اسم مطبَّع)) لكشف المسجّلات مسبقًا.
  */
-export function validateImport(rows, existingIds) {
+export function validateImport(rows, existingNames, normalize) {
   const out = [];
   const seen = new Set();
   rows.forEach((r, i) => {
-    if (i === 0 && !/\d/.test(toLatinDigits(r[1] || ""))) return; // صف العناوين
-    const name = (r[0] || "").replace(/\s+/g, " ").trim();
-    const id = toLatinDigits(r[1]).replace(/\D/g, "");
-    const gradeRaw = toLatinDigits(r[2]).replace(/ثانوي/g, "").trim();
-    const grade = GRADE_WORDS[gradeRaw] || GRADE_WORDS[gradeRaw.replace(/\s/g, "")];
-    const section = parseInt(toLatinDigits(r[3]), 10);
+    const gradeCell = toLatinDigits(r[1] || "").replace(/ثانوي/g, "").trim();
+    if (i === 0 && !GRADE_WORDS[gradeCell] && !GRADE_WORDS[gradeCell.replace(/\s/g, "")]) return; // صف العناوين
+    const name = cleanName(r[0]);
+    const grade = GRADE_WORDS[gradeCell] || GRADE_WORDS[gradeCell.replace(/\s/g, "")];
+    const section = parseInt(toLatinDigits(r[2]), 10);
+    const classId = grade && section >= 1 && section <= 3 ? `${grade}-${section}` : null;
+    const key = classId + "|" + normalize(name);
     let status = "new", note = "";
     if (!name || name.split(" ").length < 2) { status = "error"; note = "الاسم ناقص"; }
-    else if (!id) { status = "error"; note = "الرقم الطلابي ناقص"; }
     else if (!grade) { status = "error"; note = "الصف غير مفهوم"; }
-    else if (!(section >= 1 && section <= 3)) { status = "error"; note = "الفصل يجب أن يكون 1 أو 2 أو 3"; }
-    else if (seen.has(id)) { status = "dup-file"; note = "مكرر داخل الملف"; }
-    else if (existingIds.has(id)) { status = "exists"; note = "مسجّل مسبقًا"; }
-    seen.add(id);
-    out.push({ line: i + 1, name, id, classId: grade && section ? `${grade}-${section}` : null, status, note });
+    else if (!classId) { status = "error"; note = "الفصل يجب أن يكون 1 أو 2 أو 3"; }
+    else if (seen.has(key)) { status = "dup-file"; note = "مكرر داخل الملف"; }
+    else if (existingNames.get(classId)?.has(normalize(name))) { status = "exists"; note = "مسجّلة مسبقًا في الفصل"; }
+    seen.add(key);
+    out.push({ line: i + 1, name, classId, status, note });
   });
   return out;
 }

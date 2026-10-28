@@ -2,7 +2,7 @@
 // والواجهة تعرض شريطًا واضحًا «وضع تجريبي». لا شيء هنا يُحفظ أو يُرسل.
 
 import { scoreMarks, entryDelta, WEEKLY_MAX, normalizeArabic } from "./scoring.js";
-import { CLASSES, StoreError } from "./store-common.js";
+import { CLASSES, StoreError, studentCode } from "./store-common.js";
 import { buildBoard } from "./store-firestore.js";
 
 function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -23,7 +23,7 @@ export function createDemoStore() {
   let offline = false;
 
   const classes = {};
-  CLASSES.forEach((c) => { classes[c.id] = { id: c.id, grade: c.grade, section: c.section, label: c.label, activeCount: 0, totalPoints: 0, participations: 0 }; });
+  CLASSES.forEach((c, ci) => { classes[c.id] = { id: c.id, grade: c.grade, section: c.section, label: c.label, activeCount: 0, totalPoints: 0, participations: 0, nextSeq: SIZES[ci] }; });
   const students = {};
   const used = new Set();
   let n = 0;
@@ -32,7 +32,7 @@ export function createDemoStore() {
       let nm;
       do { nm = `${FIRST[Math.floor(R() * FIRST.length)]} ${FATHER[Math.floor(R() * FATHER.length)]} ${FAM[Math.floor(R() * FAM.length)]}`; } while (used.has(nm));
       used.add(nm);
-      const id = String(2610101 + n * 13); n++;
+      const id = studentCode(c.id, i + 1); n++;
       students[id] = { id, name: nm, nameNorm: normalizeArabic(nm), classId: c.id, active: true, totalPoints: 0, participations: 0, correctCount: 0, _eng: 0.08 + R() * 0.35, _skill: 0.35 + R() * 0.5 };
       classes[c.id].activeCount++;
     }
@@ -146,13 +146,7 @@ export function createDemoStore() {
     },
 
     async initSystem() { needAdmin(); },
-    async addStudent({ id, name, classId }) {
-      await wait(); guard(); needAdmin();
-      if (students[id]) throw new StoreError("duplicate-id", `الرقم الطلابي ${id} مسجّل باسم ${students[id].name}.`);
-      students[id] = { id, name, nameNorm: normalizeArabic(name), classId, active: true, totalPoints: 0, participations: 0, correctCount: 0 };
-      classes[classId].activeCount++;
-      log("student.create", `students/${id}`, null, { name, classId });
-    },
+    async addStudent({ name, classId }) { return (await store.importStudents(classId, [name]))[0]; },
     async updateStudent(id, { name, classId, active }) {
       await wait(); guard(); needAdmin();
       const s = students[id];
@@ -166,14 +160,19 @@ export function createDemoStore() {
       s.classId = newClass; s.active = newActive;
       log("student.update", `students/${id}`, before, { name: s.name, classId: newClass, active: newActive });
     },
-    async existingStudentIds() { return new Set(Object.keys(students)); },
-    async importStudents(rows) {
-      await wait(500); guard(); needAdmin();
-      rows.forEach((r) => {
-        students[r.id] = { id: r.id, name: r.name, nameNorm: normalizeArabic(r.name), classId: r.classId, active: true, totalPoints: 0, participations: 0, correctCount: 0 };
-        classes[r.classId].activeCount++;
+    async classNameSet(cid) { return new Set(Object.values(students).filter((s) => s.classId === cid).map((s) => s.nameNorm)); },
+    async importStudents(classId, names) {
+      await wait(400); guard(); needAdmin();
+      const c = classes[classId];
+      const ids = names.map((name) => {
+        c.nextSeq++;
+        const id = studentCode(classId, c.nextSeq);
+        students[id] = { id, name, nameNorm: normalizeArabic(name), classId, active: true, totalPoints: 0, participations: 0, correctCount: 0 };
+        c.activeCount++;
+        return id;
       });
-      log("student.import", "students", null, { count: rows.length });
+      log(names.length === 1 ? "student.create" : "student.import", names.length === 1 ? `students/${ids[0]}` : `classes/${classId}`, null, names.length === 1 ? { name: names[0], classId } : { count: names.length, classId });
+      return ids;
     },
     async createWeek({ number, startDate, answerKey }) {
       await wait(); guard(); needAdmin();
