@@ -111,6 +111,23 @@ const someName = await page.locator(".stu .nm b").nth(3).innerText();
 await page.fill("#eQ", someName.split(" ")[0].replace(/^ا/, "أ"));
 await page.waitForTimeout(150);
 check("البحث بالاسم يجد الطالبة (مع تطبيع الهمزات)", (await page.locator(".stu", { hasText: someName }).count()) === 1);
+// البحث في كل الفصول: اسم من فصل آخر يظهر وفصلُه مكتوب تحته، ويمكن رصده مباشرة
+const other = await page.evaluate(async () => (await window.__demoStore.classStudents("3-3"))[5]);
+await page.fill("#eQ", other.name.split(" ").slice(0, 2).join(" "));
+await page.waitForSelector(".stu", { timeout: 5000 });
+const hit = page.locator(".stu", { hasText: other.name });
+check("البحث يجد طالبة من فصل آخر دون تغيير الفصل", (await hit.count()) === 1 && (await hit.innerText()).includes("ثالث ثانوي / 3"));
+if (await hit.locator('[data-act="record"]').count()) {
+  await hit.locator('[data-act="record"]').click();
+  await page.click('[data-m="all"]');
+  await page.click('[data-m="save"]');
+  await page.waitForTimeout(700);
+  const en = await page.evaluate((id) => window.__demoStore.getEntry("w08", id), other.id);
+  check("الرصد من نتيجة البحث يُحفظ للفصل الصحيح", en && en.points === 20 && en.classIdAtEntry === "3-3");
+  check("نتيجة البحث تتحدّث إلى «شاركت»", (await hit.locator(".tag").innerText()).includes("شاركت"));
+}
+await page.fill("#eQ", "");
+await page.waitForTimeout(150);
 check("لا تظهر أرقام في قائمة الرصد", !/\d{5,}|\d-\d-\d{3}/.test(await page.locator("#eList").innerText()));
 await page.fill("#eQ", "");
 

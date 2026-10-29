@@ -45,6 +45,10 @@ export function createFirestoreStore({ fs, db, getUid, getRole }) {
     async listWeeks() { return list(await getDocs(query(collection(db, "weeks"), orderBy("number")))); },
     async getWeek(w) { return data(await getDoc(weekRef(w))); },
     async getStudent(s) { return data(await getDoc(studentRef(String(s)))); },
+    /** كل الطالبات المفعّلات (للبحث الشامل) في قراءة واحدة. */
+    async allStudents() {
+      return list(await getDocs(query(collection(db, "students"), where("active", "==", true))));
+    },
     async classStudents(cid) {
       const rows = list(await getDocs(query(collection(db, "students"), where("classId", "==", cid))));
       return rows.sort((a, b) => a.name.localeCompare(b.name, "ar"));

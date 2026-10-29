@@ -292,7 +292,8 @@ async function viewDashboard(view) {
 }
 
 /* ======================= الرصد ======================= */
-const E = { weekId: null, grade: 1, cid: "1-1", q: "", filter: "all", students: [], entries: {}, unsub: null };
+const E = { weekId: null, grade: 1, cid: "1-1", q: "", filter: "all", students: [], entries: {}, unsub: null,
+  all: null, allEntries: null, allLoading: null }; // all/allEntries: لكل الفصول، تُحمَّل عند أول بحث
 
 async function viewEntry(view) {
   const g = G;
@@ -311,7 +312,7 @@ async function viewEntry(view) {
   <div class="card entry-top">
     <div class="row">
       <label class="fl">الأسبوع<select id="eWeek">${weekOptions(E.weekId, !isAdmin())}</select></label>
-      <label class="fl">بحث باسم الطالبة<input type="search" id="eQ" placeholder="اكتبي جزءًا من الاسم" value="${esc(E.q)}" autocomplete="off" inputmode="search"></label>
+      <label class="fl">بحث باسم الطالبة في كل الفصول<input type="search" id="eQ" placeholder="اكتبي جزءًا من الاسم" value="${esc(E.q)}" autocomplete="off" inputmode="search"></label>
     </div>
     <div class="fl">الصف<div class="seg" id="eGrade">${GRADES.map((g) => `<button type="button" data-g="${g.grade}" aria-pressed="${g.grade === E.grade}">${g.name}</button>`).join("")}</div></div>
     <div class="fl">الفصل<div class="seg" id="eCls"></div></div>
@@ -320,15 +321,41 @@ async function viewEntry(view) {
   </div>
   <div id="eWeekNote"></div>
   <div class="stu-list" id="eList"><div class="loading">جارٍ التحميل…</div></div>`;
-  $("#eWeek").onchange = (e) => { E.weekId = e.target.value; loadClass(); };
-  $("#eQ").oninput = (e) => { E.q = e.target.value; renderList(); };
+  $("#eWeek").onchange = (e) => { E.weekId = e.target.value; E.allEntries = null; loadClass(); if (E.q.trim()) ensureAll(); };
+  $("#eQ").oninput = (e) => { const was = E.q.trim(); E.q = e.target.value; if (!was && E.q.trim()) ensureAll(true); renderList(); };
   view.querySelectorAll("#eGrade button").forEach((b) => (b.onclick = () => { E.grade = +b.dataset.g; E.cid = `${E.grade}-1`; E.q = ""; $("#eQ").value = ""; view.querySelectorAll("#eGrade button").forEach((x) => x.setAttribute("aria-pressed", x === b)); loadClass(); }));
   view.querySelectorAll("#eFilter button").forEach((b) => (b.onclick = () => { E.filter = b.dataset.f; view.querySelectorAll("#eFilter button").forEach((x) => x.setAttribute("aria-pressed", x === b)); renderList(); }));
   $("#eList").onclick = onListClick;
+  E.all = null; E.allEntries = null; // تُحدَّث عند كل فتح للشاشة
+  if (E.q.trim()) ensureAll();
   cleanup = () => { if (E.unsub) { E.unsub(); E.unsub = null; } closeModal(true); };
   await loadClass();
 }
 const entryWeek = () => S.weeks.find((w) => w.id === E.weekId);
+const searching = () => !!normalizeArabic(E.q);
+const entryOf = (id) => E.entries[id] || (E.allEntries && E.allEntries.map[id]) || null;
+const findStudent = (id) => E.students.find((x) => x.id === id) || (E.all || []).find((x) => x.id === id);
+function setEntry(id, en) {
+  if (E.students.some((x) => x.id === id)) E.entries[id] = en;
+  if (E.allEntries && E.allEntries.weekId === E.weekId) E.allEntries.map[id] = en;
+}
+
+/** يحمّل طالبات كل الفصول ومشاركات الأسبوع مرة واحدة للبحث الشامل (قراءة واحدة لكل منهما). */
+async function ensureAll(refreshEntries) {
+  const wid = E.weekId;
+  const stale = !E.allEntries || E.allEntries.weekId !== wid || (refreshEntries && Date.now() - E.allEntries.at > 60000);
+  if (E.all && !stale) return;
+  if (E.allLoading) return E.allLoading;
+  E.allLoading = (async () => {
+    try {
+      const [all, es] = await Promise.all([E.all ? E.all : S.store.allStudents(), stale ? S.store.weekEntries(wid) : null]);
+      E.all = all.filter((x) => x.active !== false).sort((a, b) => a.name.localeCompare(b.name, "ar"));
+      if (es && wid === E.weekId) E.allEntries = { weekId: wid, at: Date.now(), map: Object.fromEntries(es.map((x) => [x.id, x])) };
+    } catch (e) { toast(e.message || "تعذّر البحث في كل الفصول", "err"); }
+    finally { E.allLoading = null; renderList(); }
+  })();
+  return E.allLoading;
+}
 
 async function loadClass() {
   if (E.unsub) { E.unsub(); E.unsub = null; }
@@ -353,9 +380,10 @@ async function loadClass() {
 
 function visibleStudents() {
   const q = normalizeArabic(E.q);
-  return E.students.filter((s) => {
+  const pool = q ? E.all || [] : E.students;
+  return pool.filter((s) => {
     if (q && !(s.nameNorm || normalizeArabic(s.name)).includes(q)) return false;
-    const has = !!E.entries[s.id];
+    const has = !!entryOf(s.id);
     return E.filter === "all" || (E.filter === "done" ? has : !has);
   });
 }
@@ -366,28 +394,30 @@ function renderList() {
   const total = E.students.length;
   const done = E.students.filter((s) => E.entries[s.id]).length;
   $("#eCounter").innerHTML = `<span class="big">${done} من ${total}</span><span>شاركت من طالبات ${clsLabel(E.cid)}</span><div class="bar"><i style="width:${total ? (done / total) * 100 : 0}%"></i></div><span class="muted small">لم يشاركن: ${total - done}</span>`;
+  if (searching() && (!E.all || !E.allEntries || E.allEntries.weekId !== E.weekId)) { list.innerHTML = '<div class="loading">جارٍ البحث في كل الفصول…</div>'; return; }
   const rows = visibleStudents();
   if (!rows.length) {
-    list.innerHTML = `<div class="card empty">${IC.done}<b>${E.q ? "لا توجد طالبة بهذا الاسم في هذا الفصل" : !E.students.length ? "لا توجد طالبات مسجلات في هذا الفصل" : E.filter === "todo" ? "كل طالبات الفصل مرصودات" : "لا توجد مشاركات مرصودة بعد في هذا الفصل"}</b></div>`;
+    list.innerHTML = `<div class="card empty">${IC.done}<b>${E.q ? "لا توجد طالبة بهذا الاسم في أي فصل" : !E.students.length ? "لا توجد طالبات مسجلات في هذا الفصل" : E.filter === "todo" ? "كل طالبات الفصل مرصودات" : "لا توجد مشاركات مرصودة بعد في هذا الفصل"}</b></div>`;
     return;
   }
-  list.innerHTML = rows.map((s) => {
-    const en = E.entries[s.id];
+  const head = searching() ? `<div class="muted small" style="padding:2px 4px">نتائج البحث في كل الفصول: ${rows.length} طالبة</div>` : "";
+  list.innerHTML = head + rows.map((s) => {
+    const en = entryOf(s.id);
     const status = en ? `<span class="tag ok">شاركت · ${en.points}</span>` : '<span class="tag wait">لم تشارك</span>';
     const action = !en
       ? `<button type="button" class="btn btn-primary" data-act="record" data-s="${s.id}">${IC.plus}<span class="lbl">رصد مشاركة</span></button>`
       : canEdit(en) ? `<button type="button" class="btn btn-ghost" data-act="edit" data-s="${s.id}">${IC.edit}<span class="lbl">تعديل</span></button>`
       : `<span class="muted small">رصدتها ${esc(userName(en.recordedBy))}</span>`;
-    return `<div class="stu${en ? " done" : ""}" id="row-${s.id}"><div class="nm"><b>${esc(s.name)}</b></div><span class="st">${status}</span>${action}</div>`;
+    return `<div class="stu${en ? " done" : ""}" id="row-${s.id}"><div class="nm"><b>${esc(s.name)}</b>${searching() ? `<small>${clsLabel(s.classId)}</small>` : ""}</div><span class="st">${status}</span>${action}</div>`;
   }).join("");
 }
 function userName(u) { if (u === S.uid) return "أنتِ"; return (S.usersById[u] && S.usersById[u].name) || "معلمة أخرى"; }
 
 async function onListClick(e) {
   const b = e.target.closest("[data-act]"); if (!b) return;
-  const s = E.students.find((x) => x.id === b.dataset.s);
+  const s = findStudent(b.dataset.s); if (!s) return;
   if (b.dataset.act === "record") openModal(s, "create");
-  if (b.dataset.act === "edit") openModal(s, "edit", E.entries[s.id]);
+  if (b.dataset.act === "edit") openModal(s, "edit", entryOf(s.id));
 }
 
 /* ---------- نافذة الرصد ---------- */
@@ -452,12 +482,12 @@ async function onModal(b) {
     try {
       offlineGuard();
       const saved = await withTimeout(S.store.saveEntry({ weekId: E.weekId, studentId: student.id, marks, mode }));
-      E.entries[student.id] = { ...(E.entries[student.id] || {}), ...saved, id: student.id };
+      setEntry(student.id, { ...(entryOf(student.id) || {}), ...saved, id: student.id });
       renderList();
       toast(`${mode === "edit" ? "عُدّلت" : "حُفظت"} مشاركة ${student.name.split(" ")[0]} · ${saved.points} نقطة`);
       if (act === "saveNext") {
-        const vis = visibleStudents().filter((s) => !E.entries[s.id]);
-        const order = E.students.map((s) => s.id);
+        const vis = visibleStudents().filter((s) => !entryOf(s.id));
+        const order = (searching() ? E.all || [] : E.students).map((s) => s.id);
         const after = vis.find((s) => order.indexOf(s.id) > order.indexOf(student.id)) || vis[0];
         closeModal(true);
         if (after) { openModal(after, "create"); document.getElementById("row-" + after.id)?.scrollIntoView({ block: "center" }); }
@@ -466,7 +496,7 @@ async function onModal(b) {
     } catch (err) {
       if (!M) return;
       M.saving = false;
-      if (err.code === "duplicate") { M.dup = err.existing; E.entries[student.id] = err.existing; renderList(); }
+      if (err.code === "duplicate") { M.dup = err.existing; setEntry(student.id, err.existing); renderList(); }
       else M.error = err.message || "تعذّر الحفظ.";
       renderModal();
     }
@@ -594,7 +624,7 @@ async function viewManage(view) {
     <div class="card" id="impCard"></div>
     <div class="card"><h2>قائمة الطالبات <span class="sub" id="mCount"></span></h2>
       <div class="toolbar" style="margin-bottom:12px"><label class="fl">الفصل<select id="mF">${CLASSES.map((c) => `<option value="${c.id}"${MG.cid === c.id ? " selected" : ""}>${c.label}</option>`).join("")}</select></label>
-        <label class="fl">بحث<input type="search" id="mQ" value="${esc(MG.q)}" placeholder="اسم الطالبة"></label></div>
+        <label class="fl">بحث في كل الفصول<input type="search" id="mQ" value="${esc(MG.q)}" placeholder="اسم الطالبة"></label></div>
       <div class="tablewrap"><table style="min-width:520px"><thead><tr><th>الطالبة</th><th>الحالة</th><th>المجموع</th><th>المشاركات</th><th></th></tr></thead><tbody id="mBody"></tbody></table></div></div>
   </div></div>`;
   $("#mF").onchange = (e) => { MG.cid = e.target.value; loadManageList(); };
@@ -629,7 +659,8 @@ async function viewManage(view) {
       } catch (err) { $("#mErr").textContent = err.message; }
     });
   };
-  $("#mBody").onclick = (e) => { const b = e.target.closest("[data-e]"); if (!b) return; MG.edit = MG.rows.find((r) => r.id === b.dataset.e); viewManage(view); window.scrollTo(0, 0); };
+  mgAll = null; // تُحدَّث عند كل فتح للشاشة
+  $("#mBody").onclick = (e) => { const b = e.target.closest("[data-e]"); if (!b) return; MG.edit = MG.rows.find((r) => r.id === b.dataset.e) || (mgAll || []).find((r) => r.id === b.dataset.e); viewManage(view); window.scrollTo(0, 0); };
   drawImport(view);
   loadManageList();
 }
@@ -752,11 +783,18 @@ async function loadManageList() {
   try { MG.rows = await S.store.classStudents(MG.cid); if ($("#mBody")) drawManageList(); }
   catch (e) { if ($("#mBody")) $("#mBody").innerHTML = `<tr><td colspan="5"><div class="alert err">${esc(e.message)}</div></td></tr>`; }
 }
-function drawManageList() {
+let mgAll = null;
+async function drawManageList() {
   const q = normalizeArabic(MG.q);
-  const rows = MG.rows.filter((s) => !q || normalizeArabic(s.name).includes(q));
-  $("#mCount").textContent = `${rows.length} طالبة في ${clsLabel(MG.cid)}`;
-  $("#mBody").innerHTML = rows.map((s) => `<tr><td><b>${esc(s.name)}</b></td><td>${s.active ? '<span class="tag ok">مفعّلة</span>' : '<span class="tag wait">موقوفة</span>'}</td><td class="n">${s.totalPoints}</td><td class="n">${s.participations}</td><td><button type="button" class="linkbtn" data-e="${esc(s.id)}">تعديل</button></td></tr>`).join("") || '<tr><td colspan="5" class="muted">لا توجد طالبات في هذا الفصل بعد</td></tr>';
+  if (q && !mgAll) {
+    $("#mBody").innerHTML = '<tr><td colspan="5" class="muted">جارٍ البحث في كل الفصول…</td></tr>';
+    try { mgAll = (await S.store.allStudents()).sort((a, b) => a.name.localeCompare(b.name, "ar")); } catch (e) { toast(e.message, "err"); return; }
+    if (!$("#mBody")) return;
+  }
+  const pool = q ? mgAll : MG.rows;
+  const rows = pool.filter((s) => !q || normalizeArabic(s.name).includes(q));
+  $("#mCount").textContent = q ? `${rows.length} نتيجة في كل الفصول` : `${rows.length} طالبة في ${clsLabel(MG.cid)}`;
+  $("#mBody").innerHTML = rows.map((s) => `<tr><td><b>${esc(s.name)}</b>${q ? `<br><small class="muted">${clsLabel(s.classId)}</small>` : ""}</td><td>${s.active ? '<span class="tag ok">مفعّلة</span>' : '<span class="tag wait">موقوفة</span>'}</td><td class="n">${s.totalPoints}</td><td class="n">${s.participations}</td><td><button type="button" class="linkbtn" data-e="${esc(s.id)}">تعديل</button></td></tr>`).join("") || '<tr><td colspan="5" class="muted">لا توجد طالبات في هذا الفصل بعد</td></tr>';
 }
 
 /* ======================= الأسابيع والمفاتيح ======================= */

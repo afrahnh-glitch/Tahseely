@@ -108,6 +108,7 @@ export function createDemoStore() {
     async listWeeks() { return clone(Object.values(weeks).sort((a, b) => a.number - b.number)); },
     async getWeek(w) { return clone(weeks[w] || null); },
     async getStudent(s) { await wait(80); return students[s] ? clone(students[s]) : null; },
+    async allStudents() { await wait(120); return clone(Object.values(students).filter((s) => s.active)); },
     async classStudents(cid) { await wait(80); return clone(Object.values(students).filter((s) => s.classId === cid).sort((a, b) => a.name.localeCompare(b.name, "ar"))); },
     async classEntries(w, cid) { return clone(Object.values(entries[w] || {}).filter((e) => e.classIdAtEntry === cid)); },
     watchClassEntries(w, cid, cb) { cb(clone(Object.values(entries[w] || {}).filter((e) => e.classIdAtEntry === cid))); return () => {}; },
