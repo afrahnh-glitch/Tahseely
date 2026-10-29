@@ -1,6 +1,6 @@
 // شاشة العرض العامة: تقرأ مستند public/board فقط (قراءة عامة بحسب القواعد).
 // لا تسجيل دخول، ولا أي عملية كتابة.
-import { isConfigured, loadFirebase } from "./boot.js";
+import { isConfigured, loadFirestoreLite } from "./boot.js";
 
 const REFRESH_MS = 5 * 60 * 1000;
 const el = document.getElementById("board");
@@ -15,7 +15,7 @@ async function init() {
     const store = createDemoStore();
     getBoard = () => store.getBoard();
   } else {
-    const fb = await loadFirebase();
+    const fb = await loadFirestoreLite(); // نسخة خفيفة: الشاشة تقرأ مستندًا واحدًا فقط ولا تحتاج تسجيل دخول
     const { doc, getDoc } = fb.fs;
     getBoard = async () => { const s = await getDoc(doc(fb.db, "public", "board")); return s.exists() ? s.data() : null; };
   }

@@ -1,7 +1,6 @@
 // واجهة «رصيد التميز التحصيلي» — لوحة المعلمات والمديرة.
-import { isConfigured, loadFirebase } from "./boot.js";
+import { isConfigured, loadAuth, loadFirestore } from "./boot.js";
 import { createFirestoreStore } from "./store-firestore.js";
-import { createDemoStore } from "./store-demo.js";
 import { CLASSES, GRADES, parseCSV, validateImport, cleanName } from "./store-common.js";
 import { DOMAINS, scoreMarks, rankRows, normalizeArabic, WEEKLY_MAX } from "./scoring.js";
 
@@ -49,6 +48,7 @@ const isAdmin = () => S.profile && S.profile.role === "admin";
 const curWeek = () => S.weeks.find((w) => w.id === (S.config && S.config.currentWeekId)) || S.weeks[S.weeks.length - 1] || null;
 const STATUS = { draft: ["مسودة", "wait"], open: ["مفتوح للرصد", "ok"], closed: ["مغلق", "info"] };
 const root = document.getElementById("root");
+const SPLASH = '<div class="splash"><span class="mark">ر</span><b>رصيد التميز التحصيلي</b><span class="small">جارٍ التحميل…</span></div>';
 
 let toastT;
 function toast(msg, kind) {
@@ -73,21 +73,24 @@ function offlineGuard() {
 /* ======================= الإقلاع ======================= */
 async function start() {
   if (!isConfigured()) {
+    const { createDemoStore } = await import("./store-demo.js"); // لا يُحمَّل في الوضع الحقيقي
     S.store = createDemoStore();
     window.__demoStore = S.store; // للاختبارات الآلية في الوضع التجريبي فقط
     renderDemoBar();
     await enterApp(S.store.demo.uid, null);
     return;
   }
-  try { S.fb = await loadFirebase(); }
-  catch (e) {
-    root.innerHTML = fatal("تعذّر تحميل مكتبة Firebase", "تحققي من الاتصال بالإنترنت ثم أعيدي تحميل الصفحة. إن تكرر ذلك فراجعي إعدادات js/firebase-config.js.");
-    return;
-  }
-  S.store = createFirestoreStore({ fs: S.fb.fs, db: S.fb.db, getUid: () => S.fb.auth.currentUser && S.fb.auth.currentUser.uid, getRole: () => S.profile && S.profile.role });
-  S.fb.authM.onAuthStateChanged(S.fb.auth, (user) => {
-    if (!user) { S.uid = null; S.profile = null; renderLogin(); }
-    else enterApp(user.uid, user.email);
+  const LOAD_ERR = ["تعذّر تحميل مكتبة Firebase", "تحققي من الاتصال بالإنترنت ثم أعيدي تحميل الصفحة. إن تكرر ذلك فراجعي إعدادات js/firebase-config.js."];
+  // قاعدة البيانات (أكبر ملف) تبدأ بالتنزيل الآن بالتوازي، ولا ننتظرها لعرض صفحة الدخول.
+  const fsReady = loadFirestore();
+  fsReady.catch(() => {});
+  try { S.fb = await loadAuth(); }
+  catch { root.innerHTML = fatal(...LOAD_ERR); return; }
+  S.fb.authM.onAuthStateChanged(S.fb.auth, async (user) => {
+    if (!user) { S.uid = null; S.profile = null; renderLogin(); return; }
+    try { Object.assign(S.fb, await fsReady); } catch { root.innerHTML = fatal(...LOAD_ERR); return; }
+    S.store ||= createFirestoreStore({ fs: S.fb.fs, db: S.fb.db, getUid: () => S.fb.auth.currentUser && S.fb.auth.currentUser.uid, getRole: () => S.profile && S.profile.role });
+    enterApp(user.uid, user.email);
   });
 }
 
@@ -106,15 +109,23 @@ function renderDemoBar() {
 
 async function enterApp(uid, email) {
   S.uid = uid;
-  root.innerHTML = '<div class="loading">جارٍ التحميل…</div>';
-  try { S.profile = await S.store.getProfile(uid); } catch { S.profile = null; }
+  if (!root.querySelector(".splash")) root.innerHTML = SPLASH;
+  // كل القراءات الأولى معًا في جولة واحدة بدل سلسلة متتابعة.
+  // إن لم تكن المستخدمة ضمن الطاقم ترفض القواعد بقية القراءات، ونعرض لها شاشة الانتظار.
+  const [p, c, cl, w, top] = await Promise.allSettled([
+    S.store.getProfile(uid), S.store.getConfig(), S.store.listClasses(), S.store.listWeeks(), S.store.topStudents({ pageSize: 5 })
+  ]);
+  if (S.uid !== uid) return;
+  S.profile = p.status === "fulfilled" ? p.value : null;
   if (!S.profile || !S.profile.active || !["admin", "teacher"].includes(S.profile.role)) { renderPending(uid, email); return; }
-  try {
-    [S.config, S.classes, S.weeks] = await Promise.all([S.store.getConfig(), S.store.listClasses(), S.store.listWeeks()]);
-  } catch (e) { root.innerHTML = fatal("تعذّر تحميل البيانات", e.message || ""); return; }
+  const failed = [c, cl, w].find((r) => r.status === "rejected");
+  if (failed) { root.innerHTML = fatal("تعذّر تحميل البيانات", (failed.reason && failed.reason.message) || ""); return; }
+  [S.config, S.classes, S.weeks] = [c.value, cl.value, w.value];
   if (!S.classes.length) { renderInit(); return; }
+  S.prefetchTop = top.status === "fulfilled" ? top.value.rows : null;
+  S.basicsFresh = true; // الصفحة الأولى لا تعيد قراءة ما حمّلناه للتو
   S.usersById = {};
-  if (isAdmin()) { try { S.usersById = Object.fromEntries((await S.store.listUsers()).map((u) => [u.id, u])); } catch {} }
+  if (isAdmin()) S.store.listUsers().then((us) => { S.usersById = Object.fromEntries(us.map((u) => [u.id, u])); }).catch(() => {});
   renderShell();
   route();
 }
@@ -225,10 +236,12 @@ function route() {
   window.scrollTo(0, 0);
   const fn = { dashboard: viewDashboard, entry: viewEntry, students: viewStudents, classes: viewClasses, manage: viewManage, weeks: viewWeeks, users: viewUsers, audit: viewAudit }[r];
   Promise.resolve(fn(view)).catch((e) => { view.innerHTML = `<div class="alert err">${esc(e.message || "تعذّر تحميل الصفحة")}</div>`; });
+  S.basicsFresh = false; S.prefetchTop = null; // تُستخدم للصفحة الأولى فقط
 }
 window.addEventListener("hashchange", route);
 
 async function refreshBasics() {
+  if (S.basicsFresh) { S.basicsFresh = false; updateWeekPill(); return; }
   [S.config, S.classes, S.weeks] = await Promise.all([S.store.getConfig(), S.store.listClasses(), S.store.listWeeks()]);
   updateWeekPill();
 }
@@ -239,6 +252,8 @@ const weekOptions = (sel, onlyOpen) => S.weeks.filter((w) => !onlyOpen || w.stat
 /* ======================= لوحة التحكم ======================= */
 async function viewDashboard(view) {
   const g = G;
+  const pre = S.prefetchTop; // أفضل الطالبات المحمّلات مع الدخول
+  S.prefetchTop = null;
   await refreshBasics();
   if (g !== G) return;
   const w = curWeek();
@@ -247,7 +262,7 @@ async function viewDashboard(view) {
     view.innerHTML = `<div class="hero"><div><h2>لا يوجد أسبوع للمسابقة بعد</h2><p>${isAdmin() ? "أنشئي أول أسبوع وأدخلي مفتاح إجابته، ثم افتحيه للرصد." : "ستُنشئ مديرة النظام أول أسبوع قريبًا."}</p></div>${isAdmin() ? '<a class="btn btn-gold" href="#weeks">إنشاء أسبوع</a>' : ""}</div>`;
     return;
   }
-  const top = (await S.store.topStudents({ pageSize: 5 })).rows;
+  const top = pre || (await S.store.topStudents({ pageSize: 5 })).rows;
   if (g !== G) return;
   const part = w.participants || 0;
   const ranked = rankRows(top, (s) => s.totalPoints, (s) => s.name);
