@@ -1,5 +1,5 @@
 // واجهة «رصيد التميز التحصيلي» — لوحة المعلمات والمديرة.
-import { isConfigured, loadAuth, loadFirestore } from "./boot.js";
+import { isConfigured, loadAuth, loadFirestore, createLoginAccount, sendLoginEmail } from "./boot.js";
 import { createFirestoreStore } from "./store-firestore.js";
 import { CLASSES, GRADES, parseCSV, validateImport, cleanName } from "./store-common.js";
 import { DOMAINS, scoreMarks, rankRows, normalizeArabic, WEEKLY_MAX } from "./scoring.js";
@@ -869,7 +869,21 @@ async function viewWeeks(view) {
 }
 
 /* ======================= المستخدمات ======================= */
-const U = { edit: null };
+const U = { edit: null, byUid: false, flash: "" };
+// في الوضع التجريبي لا يُرسل شيء: نحاكي الإنشاء والإرسال فقط.
+const INVITE = {
+  create: (email) => (S.store.mode === "demo" ? Promise.resolve("demo-" + Math.random().toString(36).slice(2, 12)) : createLoginAccount(email)),
+  send: (email) => (S.store.mode === "demo" ? new Promise((r) => setTimeout(r, 300)) : sendLoginEmail(email))
+};
+const AUTH_ERR = {
+  "auth/email-already-in-use": "يوجد حساب دخول بهذا البريد مسبقًا. استخدمي «إضافة حساب موجود برمز الحساب» بالأسفل، أو اضغطي «إرسال رابط الدخول» إن كانت مضافة في القائمة.",
+  "auth/invalid-email": "البريد الإلكتروني غير صحيح.",
+  "auth/operation-not-allowed": "الدخول بالبريد وكلمة المرور غير مفعّل في Firebase ← Authentication ← Sign-in method.",
+  "auth/too-many-requests": "محاولات كثيرة في وقت قصير. انتظري قليلًا ثم أعيدي المحاولة.",
+  "auth/network-request-failed": "لا يوجد اتصال بالإنترنت."
+};
+const authMsg = (e) => AUTH_ERR[e && e.code] || (e && e.message) || "تعذّرت العملية.";
+
 async function viewUsers(view) {
   const g = G;
   const users = await S.store.listUsers();
@@ -877,31 +891,87 @@ async function viewUsers(view) {
   S.usersById = Object.fromEntries(users.map((u) => [u.id, u]));
   const u = U.edit;
   const self = u && u.id === S.uid;
-  view.innerHTML = `<div class="two">
-    <div class="card"><h2>${u ? "تعديل صلاحية" : "إضافة مستخدمة"}</h2><form class="form" id="uForm" novalidate>
-      <div class="note">${IC.info}<span>أنشئي حساب المعلمة أولًا في Firebase Console ← Authentication. عند دخولها أول مرة يظهر لها «رمز الحساب»؛ الصقيه هنا.</span></div>
-      <label class="fl">رمز الحساب (UID)<input type="text" id="uId" dir="ltr" value="${u ? esc(u.id) : ""}"${u ? " readonly" : ""}></label>
-      <label class="fl">الاسم<input type="text" id="uName" value="${u ? esc(u.name) : ""}"></label>
-      <label class="fl">البريد<input type="email" id="uEmail" dir="ltr" value="${u ? esc(u.email || "") : ""}"></label>
-      <label class="fl">الصلاحية<select id="uRole"${self ? " disabled" : ""}><option value="teacher"${!u || u.role === "teacher" ? " selected" : ""}>معلمة: ترصد وتعدّل ما رصدته</option><option value="admin"${u && u.role === "admin" ? " selected" : ""}>مديرة النظام: كل الصلاحيات</option></select></label>
-      <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="uActive"${!u || u.active ? " checked" : ""}${self ? " disabled" : ""}> الحساب مفعّل</label>
+  const roleSel = (cur, dis) => `<label class="fl">الصلاحية<select id="uRole"${dis ? " disabled" : ""}><option value="teacher"${!cur || cur === "teacher" ? " selected" : ""}>معلمة: ترصد وتعدّل ما رصدته</option><option value="admin"${cur === "admin" ? " selected" : ""}>مديرة النظام: كل الصلاحيات</option></select></label>`;
+  const form = u
+    ? `<h2>تعديل صلاحية</h2><form class="form" id="uForm" novalidate>
+      <label class="fl">الاسم<input type="text" id="uName" value="${esc(u.name)}"></label>
+      <label class="fl">البريد<input type="email" id="uEmail" dir="ltr" value="${esc(u.email || "")}"></label>
+      ${roleSel(u.role, self)}
+      <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="uActive"${u.active ? " checked" : ""}${self ? " disabled" : ""}> الحساب مفعّل</label>
       ${self ? '<p class="muted small" style="margin:0">لا يمكنكِ تغيير صلاحية حسابكِ أو إيقافه من هنا.</p>' : ""}
       <div class="err" id="uErr"></div>
-      <div class="mactions"><button type="submit" class="btn btn-primary" id="uSave">${u ? "حفظ" : "إضافة"}</button>${u ? '<button type="button" class="btn btn-ghost" id="uCancel">إلغاء</button>' : ""}</div></form></div>
+      <div class="mactions"><button type="submit" class="btn btn-primary" id="uSave">حفظ</button>${u.email ? '<button type="button" class="btn btn-ghost" id="uResend">إرسال رابط الدخول</button>' : ""}<button type="button" class="btn btn-ghost" id="uCancel">إلغاء</button></div></form>`
+    : !U.byUid
+    ? `<h2>إضافة معلمة</h2><form class="form" id="uInvite" novalidate>
+      <div class="note">${IC.info}<span>يُنشأ حسابها وتصلها رسالة على بريدها فيها رابط تختار منه كلمة مرورها، ثم تدخل إلى النظام بالبريد وكلمة المرور.</span></div>
+      <label class="fl">اسم المعلمة<input type="text" id="uName" placeholder="مثال: أ. نورة العتيبي"></label>
+      <label class="fl">بريدها الإلكتروني<input type="email" id="uEmail" dir="ltr" autocomplete="off" placeholder="name@example.com"></label>
+      ${roleSel("teacher", false)}
+      <div class="err" id="uErr"></div>
+      <div id="uDone">${U.flash}</div>
+      <div class="mactions"><button type="submit" class="btn btn-primary" id="uSave">إضافة وإرسال الدعوة</button></div>
+      <button type="button" class="linkbtn" id="uByUid">إضافة حساب موجود برمز الحساب</button></form>`
+    : `<h2>إضافة حساب موجود</h2><form class="form" id="uForm" novalidate>
+      <div class="note">${IC.info}<span>للمعلمة التي لديها حساب دخول مسبقًا: عند دخولها يظهر لها «رمز الحساب»، فترسله إليكِ.</span></div>
+      <label class="fl">رمز الحساب (UID)<input type="text" id="uId" dir="ltr"></label>
+      <label class="fl">الاسم<input type="text" id="uName"></label>
+      <label class="fl">البريد<input type="email" id="uEmail" dir="ltr"></label>
+      ${roleSel("teacher", false)}
+      <div class="err" id="uErr"></div>
+      <div class="mactions"><button type="submit" class="btn btn-primary" id="uSave">إضافة</button><button type="button" class="btn btn-ghost" id="uCancel">رجوع</button></div></form>`;
+  view.innerHTML = `<div class="two">
+    <div class="card">${form}</div>
     <div class="card"><h2>الحسابات <span class="sub">${users.length}</span></h2><div class="tablewrap"><table><thead><tr><th>الاسم</th><th>البريد</th><th>الصلاحية</th><th>الحالة</th><th></th></tr></thead><tbody>
       ${users.map((x) => `<tr><td><b>${esc(x.name)}</b>${x.id === S.uid ? ' <span class="tag info">أنتِ</span>' : ""}</td><td dir="ltr">${esc(x.email || "")}</td><td>${x.role === "admin" ? '<span class="tag gold">مديرة</span>' : '<span class="tag info">معلمة</span>'}</td><td>${x.active ? '<span class="tag ok">مفعّل</span>' : '<span class="tag wait">موقوف</span>'}</td><td><button class="linkbtn" data-u="${esc(x.id)}">تعديل</button></td></tr>`).join("")}
     </tbody></table></div></div></div>`;
-  view.querySelectorAll("[data-u]").forEach((b) => (b.onclick = () => { U.edit = users.find((x) => x.id === b.dataset.u); viewUsers(view); }));
-  if ($("#uCancel")) $("#uCancel").onclick = () => { U.edit = null; viewUsers(view); };
-  $("#uForm").onsubmit = (e) => {
+  view.querySelectorAll("[data-u]").forEach((b) => (b.onclick = () => { U.edit = users.find((x) => x.id === b.dataset.u); U.byUid = false; viewUsers(view); }));
+  if ($("#uCancel")) $("#uCancel").onclick = () => { U.edit = null; U.byUid = false; viewUsers(view); };
+  if ($("#uByUid")) $("#uByUid").onclick = () => { U.byUid = true; viewUsers(view); };
+  const err = (t) => { const el = $("#uErr"); if (el) el.textContent = t; };
+
+  // ---- دعوة معلمة جديدة ----
+  if ($("#uInvite")) $("#uInvite").onsubmit = (e) => {
     e.preventDefault();
-    const id = $("#uId").value.trim(), name = $("#uName").value.trim(), email = $("#uEmail").value.trim();
-    const role = self ? u.role : $("#uRole").value, active = self ? true : $("#uActive").checked;
-    if (!/^[A-Za-z0-9_-]{6,128}$/.test(id)) return ($("#uErr").textContent = "رمز الحساب غير صحيح. انسخيه كما يظهر للمعلمة.");
-    if (!name) return ($("#uErr").textContent = "اكتبي الاسم.");
+    const name = $("#uName").value.trim(), email = $("#uEmail").value.trim().toLowerCase(), role = $("#uRole").value;
+    if (!name) return err("اكتبي اسم المعلمة.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err("اكتبي بريدًا إلكترونيًا صحيحًا.");
+    if (users.some((x) => (x.email || "").toLowerCase() === email)) return err("هذا البريد مضاف مسبقًا في القائمة. اضغطي «تعديل» بجانبه ثم «إرسال رابط الدخول».");
+    err("");
     busy($("#uSave"), async () => {
-      try { offlineGuard(); await withTimeout(S.store.upsertUser(id, { name, email, role, active })); toast("حُفظت الصلاحية"); U.edit = null; viewUsers(view); }
-      catch (err) { $("#uErr").textContent = err.message; }
+      let uid;
+      try { offlineGuard(); uid = await withTimeout(INVITE.create(email)); }
+      catch (e2) { return err(authMsg(e2)); }
+      try { await withTimeout(S.store.upsertUser(uid, { name, email, role, active: true })); }
+      catch (e2) { return err("أُنشئ حساب الدخول لكن تعذّر حفظ الصلاحية: " + e2.message + " — استخدمي «إضافة حساب موجود برمز الحساب» بالرمز: " + uid); }
+      try {
+        await withTimeout(INVITE.send(email));
+        U.flash = `<div class="alert ok"><div><b>أُضيفت ${esc(name)}</b> وأُرسلت الدعوة إلى <span dir="ltr">${esc(email)}</span>.</div><div class="small">إن لم تجدها في صندوق الوارد فلتبحث في البريد غير المرغوب (Junk). الرابط صالح لساعة تقريبًا، ويمكنكِ إعادة إرساله من «تعديل».</div></div>`;
+        toast("أُرسلت الدعوة");
+      } catch (e2) {
+        U.flash = `<div class="alert warn">أُضيفت ${esc(name)}، لكن تعذّر إرسال الرسالة (${esc(authMsg(e2))}). اضغطي «تعديل» بجانب اسمها ثم «إرسال رابط الدخول».</div>`;
+      }
+      if (g === G) await viewUsers(view); // تحديث القائمة مع إبقاء رسالة النتيجة
+      U.flash = "";
+    });
+  };
+
+  // ---- إعادة إرسال رابط الدخول ----
+  if ($("#uResend")) $("#uResend").onclick = (e) => busy(e.currentTarget, async () => {
+    try { offlineGuard(); await withTimeout(INVITE.send(u.email)); toast("أُرسل رابط الدخول إلى " + u.email); }
+    catch (e2) { err(authMsg(e2)); }
+  });
+
+  // ---- تعديل، أو إضافة برمز الحساب ----
+  if ($("#uForm")) $("#uForm").onsubmit = (e) => {
+    e.preventDefault();
+    const id = u ? u.id : $("#uId").value.trim();
+    const name = $("#uName").value.trim(), email = $("#uEmail").value.trim();
+    const role = self ? u.role : $("#uRole").value, active = u ? (self ? true : $("#uActive").checked) : true;
+    if (!/^[A-Za-z0-9_-]{6,128}$/.test(id)) return err("رمز الحساب غير صحيح. انسخيه كما يظهر للمعلمة.");
+    if (!name) return err("اكتبي الاسم.");
+    busy($("#uSave"), async () => {
+      try { offlineGuard(); await withTimeout(S.store.upsertUser(id, { name, email, role, active })); toast("حُفظت الصلاحية"); U.edit = null; U.byUid = false; viewUsers(view); }
+      catch (e2) { err(e2.message); }
     });
   };
 }

@@ -48,3 +48,42 @@ export async function loadFirebase() {
   const [a, f] = await Promise.all([loadAuth(), loadFirestore()]);
   return { ...a, ...f };
 }
+
+/* ---------- دعوة المعلمات (للمديرة) ----------
+ * لا خادم ولا مفاتيح سرية: ننشئ حساب المعلمة من نسخة ثانية مؤقتة من التطبيق
+ * (حتى لا تُسجَّل المديرة خروجًا)، بكلمة مرور عشوائية لا يعرفها أحد،
+ * ثم يُرسل Firebase إلى بريد المعلمة رابطًا لتعيين كلمة مرورها بنفسها.
+ */
+function randomPassword() {
+  const a = new Uint8Array(24);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%"[b % 61]).join("");
+}
+
+/** ينشئ حساب دخول جديد ويعيد رمزه (UID). */
+export async function createLoginAccount(email) {
+  const [appM, authM] = await Promise.all([import(`${CDN}/firebase-app.js`), import(`${CDN}/firebase-auth.js`)]);
+  const second = appM.initializeApp(firebaseConfig, "invite-" + Date.now());
+  try {
+    const auth2 = authM.initializeAuth(second, { persistence: authM.inMemoryPersistence });
+    const cred = await authM.createUserWithEmailAndPassword(auth2, email, randomPassword());
+    await authM.signOut(auth2);
+    return cred.user.uid;
+  } finally {
+    appM.deleteApp(second).catch(() => {});
+  }
+}
+
+/** يرسل إلى البريد رسالة بالعربية فيها رابط تعيين كلمة المرور، ثم الرجوع إلى النظام. */
+export async function sendLoginEmail(email) {
+  const { auth, authM } = await loadAuth();
+  auth.languageCode = "ar";
+  const back = location.origin + location.pathname.replace(/[^/]*$/, "");
+  try {
+    await authM.sendPasswordResetEmail(auth, email, { url: back });
+  } catch (e) {
+    // إن لم يكن نطاق الموقع ضمن Authorized domains نرسل الرسالة بلا زر الرجوع
+    if (/continue-uri|unauthorized-domain/.test(e.code || "")) await authM.sendPasswordResetEmail(auth, email);
+    else throw e;
+  }
+}
